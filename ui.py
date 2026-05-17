@@ -1,8 +1,10 @@
 import imgui
+from presets import save_preset, load_preset, list_presets, delete_preset
 
 TOOL_NAMES = ["None", "Push", "Paint", "Erase"]
 _CELL_W = 44.0
-_SWATCH = 16.0  # color swatch size
+_SWATCH = 16.0
+_preset_name = [""]
 
 
 def _color_swatch(renderer, idx):
@@ -125,6 +127,10 @@ def draw_ui(sim, tool, renderer):
 
     expanded, _ = imgui.collapsing_header("Palette")
     if expanded:
+        if imgui.button("Randomize Colors"):
+            import numpy as np
+            renderer.palette[:sim.num_colors, :3] = np.random.rand(sim.num_colors, 3).astype(np.float32)
+            renderer._upload_palette()
         palette_dirty = False
         for i in range(sim.num_colors):
             imgui.push_id(f"pal{i}")
@@ -135,6 +141,29 @@ def draw_ui(sim, tool, renderer):
             imgui.pop_id()
         if palette_dirty:
             renderer._upload_palette()
+
+    imgui.spacing()
+    imgui.separator()
+
+    expanded, _ = imgui.collapsing_header("Presets")
+    if expanded:
+        imgui.set_next_item_width(160)
+        _, _preset_name[0] = imgui.input_text("##pname", _preset_name[0], 64)
+        imgui.same_line()
+        if imgui.button("Save") and _preset_name[0].strip():
+            save_preset(sim, _preset_name[0].strip())
+        imgui.spacing()
+        for name in list_presets():
+            del_w = imgui.calc_text_size("x").x + imgui.get_style().frame_padding.x * 2
+            btn_w = imgui.get_content_region_available_width() - del_w - imgui.get_style().item_spacing.x
+            if imgui.button(f"{name}##load", btn_w):
+                load_preset(sim, name)
+                sim.reset_particles()
+            imgui.same_line()
+            imgui.push_id(f"del{name}")
+            if imgui.button("x"):
+                delete_preset(name)
+            imgui.pop_id()
 
     imgui.spacing()
     imgui.separator()
