@@ -125,14 +125,16 @@ class Renderer:
                     mode3d=False, brush3d_pos=None, mvp4x4=None, view4x4=None):
         N = 64
         angles = np.linspace(0, 2*math.pi, N, endpoint=False)
-        if mode3d and brush3d_pos is not None and mvp4x4 is not None:
-            bx, by, bz = brush3d_pos
-            clip_c = mvp4x4 @ np.array([bx, by, bz, 1.0], dtype=np.float32)
-            if clip_c[3] <= 0:
-                return
-            cx_ndc = clip_c[0] / clip_c[3]
-            cy_ndc = clip_c[1] / clip_c[3]
-            # fixed screen-space radius in pixels
+        if mode3d and brush3d_pos is not None:
+            if mvp4x4 is not None:
+                bx, by, bz = brush3d_pos
+                clip_c = mvp4x4 @ np.array([bx, by, bz, 1.0], dtype=np.float32)
+                if clip_c[3] <= 0:
+                    return
+                cx_ndc = clip_c[0] / clip_c[3]
+                cy_ndc = clip_c[1] / clip_c[3]
+            else:
+                cx_ndc, cy_ndc = 0.0, 0.0  # locked mouse: draw at screen center
             r_px = 40.0
             pts = []
             for a in angles:

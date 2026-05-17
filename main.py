@@ -79,6 +79,8 @@ def main():
     cam_yaw = -math.pi / 2
     cam_pitch = 0.0
     mouse3d_last = None
+    locked_mx, locked_my = 0.0, 0.0
+    bp = np.array([2000.0, 2000.0, 2000.0], dtype=np.float32)
 
     def enter_3d():
         nonlocal cam_pos, cam_yaw, cam_pitch
@@ -150,12 +152,18 @@ def main():
             rotating = (glfw.get_mouse_button(win, glfw.MOUSE_BUTTON_RIGHT) == glfw.PRESS and
                         not io.want_capture_mouse)
             if rotating:
+                if mouse3d_last is None:
+                    locked_mx, locked_my = mx, my
+                    glfw.set_input_mode(win, glfw.CURSOR, glfw.CURSOR_DISABLED)
                 if mouse3d_last is not None:
                     cam_yaw   -= (mx - mouse3d_last[0]) * 0.003
                     cam_pitch += (my - mouse3d_last[1]) * 0.003
                     cam_pitch  = max(-math.pi/2 + 0.01, min(math.pi/2 - 0.01, cam_pitch))
                 mouse3d_last = (mx, my)
             else:
+                if mouse3d_last is not None:
+                    glfw.set_input_mode(win, glfw.CURSOR, glfw.CURSOR_NORMAL)
+                    glfw.set_cursor_pos(win, locked_mx, locked_my)
                 mouse3d_last = None
 
             # Build MVP
@@ -165,8 +173,10 @@ def main():
             mvp4x4 = (proj @ view).astype(np.float32)
 
             # unproject via inverse MVP (float64 for precision)
-            ndc_x = (mx / w) * 2.0 - 1.0
-            ndc_y = 1.0 - (my / h) * 2.0
+            sample_mx = w / 2 if rotating else mx
+            sample_my = h / 2 if rotating else my
+            ndc_x = (sample_mx / w) * 2.0 - 1.0
+            ndc_y = 1.0 - (sample_my / h) * 2.0
             mvp64 = (proj @ view).astype(np.float64)
             inv_mvp = np.linalg.inv(mvp64)
             near_clip = np.array([ndc_x, ndc_y, -1.0, 1.0], dtype=np.float64)
@@ -238,8 +248,9 @@ def main():
         renderer.draw(sim, w, h, view_offset=view_offset, view_scale=view_scale, mvp=mvp)
 
         if sim.mode3d:
+            cursor_mvp = mvp4x4 if not rotating else None
             renderer.draw_cursor(0, 0, sim.brush_radius, w, h,
-                                 mode3d=True, brush3d_pos=bp, mvp4x4=mvp4x4, view4x4=view)
+                                 mode3d=True, brush3d_pos=bp, mvp4x4=cursor_mvp, view4x4=view)
         else:
             renderer.draw_cursor(wx, wy, sim.brush_radius, w, h,
                                  view_offset=view_offset, view_scale=view_scale)
