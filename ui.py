@@ -5,6 +5,9 @@ TOOL_NAMES = ["None", "Push", "Paint", "Erase"]
 _CELL_W = 44.0
 _SWATCH = 16.0
 _preset_name = [""]
+_all_force = [0.0]
+_all_min_r = [40.0]
+_all_max_r = [120.0]
 
 
 def _color_swatch(renderer, idx):
@@ -199,15 +202,31 @@ def draw_ui(sim, tool, renderer):
     imgui.separator()
 
     rules_dirty = False
+
     expanded, _ = imgui.collapsing_header("Force Matrix")
     if expanded:
         rules_dirty |= _matrix_editor("force", sim.force_matrix, -1.0, 1.0, renderer)
+        imgui.set_next_item_width(-1)
+        changed, _all_force[0] = imgui.slider_float("##af", _all_force[0], -1.0, 1.0, "Set all: %.2f")
+        if changed:
+            sim.force_matrix[:] = _all_force[0]
+            rules_dirty = True
     expanded, _ = imgui.collapsing_header("Min Radius Matrix")
     if expanded:
         rules_dirty |= _matrix_editor("minr", sim.min_r_matrix, 5.0, 100.0, renderer, speed=0.5)
+        imgui.set_next_item_width(-1)
+        changed, _all_min_r[0] = imgui.slider_float("##amr", _all_min_r[0], 1.0, 200.0, "Set all: %.0f")
+        if changed:
+            sim.min_r_matrix[:] = _all_min_r[0]
+            rules_dirty = True
     expanded, _ = imgui.collapsing_header("Max Radius Matrix")
     if expanded:
         rules_dirty |= _matrix_editor("maxr", sim.max_r_matrix, 20.0, 300.0, renderer, speed=0.5)
+        imgui.set_next_item_width(-1)
+        changed, _all_max_r[0] = imgui.slider_float("##axr", _all_max_r[0], 5.0, 300.0, "Set all: %.0f")
+        if changed:
+            sim.max_r_matrix[:] = _all_max_r[0]
+            rules_dirty = True
 
     if rules_dirty:
         sim._upload_rules()
