@@ -171,6 +171,19 @@ class Simulation:
         self._prog_brush = _compile(_BRUSH_SRC)
         self._prog_erase = _compile(_ERASE_SRC)
         self._ssbo_particles, self._ssbo_rules, self._ssbo_keep, self._ssbo_erase_types = glGenBuffers(4)
+        # cache uniform locations
+        def _locs(prog, names):
+            return {n: glGetUniformLocation(prog, n) for n in names}
+        self._uloc_sim = _locs(self._prog_sim, [
+            "num_particles","num_colors","force_factor","friction_factor","repel",
+            "world_w","world_h","world_d","wrap","world_mode","mode3d","dt_scale",
+            "max_speed","max_accel"])
+        self._uloc_brush = _locs(self._prog_brush, [
+            "num_particles","wrap","mode3d","brush_x","brush_y","brush_z",
+            "brush_r","world_w","world_h","brush_vx","brush_vy","brush_force"])
+        self._uloc_erase = _locs(self._prog_erase, [
+            "num_particles","wrap","mode3d","brush_x","brush_y","brush_z",
+            "brush_r","world_w","world_h","num_erase_types"])
         self.randomize_rules()
         self.reset_particles()
 
@@ -213,50 +226,56 @@ class Simulation:
                 self.max_r_matrix[j,i] = self.max_r_matrix[i,j]
         self._upload_rules()
 
-    def _u(self, prog, name):
-        return glGetUniformLocation(prog, name)
-
-    def step(self, dt_scale=1.0):
+    def _setup_sim_uniforms(self, dt_scale):
+        u = self._uloc_sim
         glUseProgram(self._prog_sim)
-        u = lambda n: self._u(self._prog_sim, n)
-        glUniform1i(u("num_particles"),  self.num_particles)
-        glUniform1i(u("num_colors"),     self.num_colors)
-        glUniform1f(u("force_factor"),   self.force_factor)
-        glUniform1f(u("friction_factor"),self.friction_factor)
-        glUniform1f(u("repel"),          self.repel)
-        glUniform1f(u("world_w"),        self.world_w)
-        glUniform1f(u("world_h"),        self.world_h)
-        glUniform1f(u("world_d"),        self.world_d)
-        glUniform1i(u("wrap"),           self.world_mode)
-        glUniform1i(u("world_mode"),     self.world_mode)
-        glUniform1i(u("mode3d"),         1 if self.mode3d else 0)
-        glUniform1f(u("dt_scale"),       dt_scale)
-        glUniform1f(u("max_speed"),      self.max_speed)
-        glUniform1f(u("max_accel"),      self.max_accel)
+        glUniform1i(u["num_particles"],  self.num_particles)
+        glUniform1i(u["num_colors"],     self.num_colors)
+        glUniform1f(u["force_factor"],   self.force_factor)
+        glUniform1f(u["friction_factor"],self.friction_factor)
+        glUniform1f(u["repel"],          self.repel)
+        glUniform1f(u["world_w"],        self.world_w)
+        glUniform1f(u["world_h"],        self.world_h)
+        glUniform1f(u["world_d"],        self.world_d)
+        glUniform1i(u["wrap"],           self.world_mode)
+        glUniform1i(u["world_mode"],     self.world_mode)
+        glUniform1i(u["mode3d"],         1 if self.mode3d else 0)
+        glUniform1f(u["dt_scale"],       dt_scale)
+        glUniform1f(u["max_speed"],      self.max_speed)
+        glUniform1f(u["max_accel"],      self.max_accel)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, self._ssbo_particles)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, self._ssbo_rules)
+
+    def step(self, dt_scale=1.0):
+        self._setup_sim_uniforms(dt_scale)
         glDispatchCompute((self.num_particles+63)//64, 1, 1)
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
 
-    def _set_brush_uniforms(self, prog, wx, wy, vx, vy, wz=0.0):
-        u = lambda n: self._u(prog, n)
-        glUniform1i(u("num_particles"), self.num_particles)
-        glUniform1i(u("wrap"),          self.world_mode)
-        glUniform1i(u("mode3d"),        1 if self.mode3d else 0)
-        glUniform1f(u("brush_x"),       wx)
-        glUniform1f(u("brush_y"),       wy)
-        glUniform1f(u("brush_z"),       wz)
-        glUniform1f(u("brush_r"),       self.brush_radius)
-        glUniform1f(u("world_w"),       self.world_w)
-        glUniform1f(u("world_h"),       self.world_h)
-        if glGetUniformLocation(prog, "brush_vx") >= 0:
-            glUniform1f(u("brush_vx"),      vx)
-            glUniform1f(u("brush_vy"),      vy)
-            glUniform1f(u("brush_force"),   self.brush_force)
+    def step_multi(self, dt_scale, substeps):
+        self._setup_sim_uniforms(dt_scale)
+        for _ in range(substeps):
+            glDispatchCompute((self.num_particles+63)//64, 1, 1)
+            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+    def _set_brush_uniforms(self, prog, uloc, wx, wy, vx, vy, wz=0.0):
+        u = uloc
+        glUniform1i(u["num_particles"], self.num_particles)
+        glUniform1i(u["wrap"],          self.world_mode)
+        glUniform1i(u["mode3d"],        1 if self.mode3d else 0)
+        glUniform1f(u["brush_x"],       wx)
+        glUniform1f(u["brush_y"],       wy)
+        glUniform1f(u["brush_z"],       wz)
+        glUniform1f(u["brush_r"],       self.brush_radius)
+        glUniform1f(u["world_w"],       self.world_w)
+        glUniform1f(u["world_h"],       self.world_h)
+        if u.get("brush_vx", -1) >= 0:
+            glUniform1f(u["brush_vx"],    vx)
+            glUniform1f(u["brush_vy"],    vy)
+            glUniform1f(u["brush_force"], self.brush_force)
 
     def apply_brush(self, wx, wy, vx=0.0, vy=0.0, wz=0.0):
         glUseProgram(self._prog_brush)
-        self._set_brush_uniforms(self._prog_brush, wx, wy, vx, vy, wz)
+        self._set_brush_uniforms(self._prog_brush, self._uloc_brush, wx, wy, vx, vy, wz)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, self._ssbo_particles)
         glDispatchCompute((self.num_particles+63)//64, 1, 1)
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
@@ -272,8 +291,8 @@ class Simulation:
         glBufferData(GL_SHADER_STORAGE_BUFFER, max(types.nbytes, 4), types if len(types) else np.zeros(1, dtype=np.int32), GL_DYNAMIC_DRAW)
 
         glUseProgram(self._prog_erase)
-        self._set_brush_uniforms(self._prog_erase, wx, wy, 0, 0, wz)
-        glUniform1i(glGetUniformLocation(self._prog_erase, "num_erase_types"), len(types))
+        self._set_brush_uniforms(self._prog_erase, self._uloc_erase, wx, wy, 0, 0, wz)
+        glUniform1i(self._uloc_erase["num_erase_types"], len(types))
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, self._ssbo_particles)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, self._ssbo_keep)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, self._ssbo_erase_types)
@@ -298,8 +317,8 @@ class Simulation:
         data['x'] = wx + np.cos(angles) * radii
         data['y'] = wy + np.sin(angles) * radii
         data['z'] = wz + (np.random.rand(count) - 0.5) * self.brush_radius * 2 if self.mode3d else 0.0
-        color_pool = list(self.brush_colors) if self.brush_colors else list(range(self.num_colors))
-        data['color'] = [color_pool[np.random.randint(len(color_pool))] for _ in range(count)]
+        color_pool = np.array(list(self.brush_colors) if self.brush_colors else list(range(self.num_colors)), dtype=np.int32)
+        data['color'] = color_pool[np.random.randint(len(color_pool), size=count)]
 
         # append to existing buffer
         n_old = self.num_particles

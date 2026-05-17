@@ -203,8 +203,7 @@ def main():
                 brush_last = None
 
         sub_dt = dt * sim.sim_speed * 60.0 / sim.substeps
-        for _ in range(sim.substeps):
-            sim.step(dt_scale=sub_dt)
+        sim.step_multi(sub_dt, sim.substeps)
 
         glViewport(0, 0, w, h)
         glClearColor(0.05, 0.05, 0.08, 1.0)

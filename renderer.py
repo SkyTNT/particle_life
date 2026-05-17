@@ -155,7 +155,17 @@ class Renderer:
         glBindVertexArray(0)
 
         self.grid_prog = _compile_prog(GRID_VERT, GRID_FRAG)
-        self.grid_vao = glGenVertexArrays(1)  # empty VAO for attributeless draw
+        self.grid_vao = glGenVertexArrays(1)
+
+        def _locs(prog, names):
+            return {n: glGetUniformLocation(prog, n) for n in names}
+        self._uloc_draw = _locs(self.prog, ["world_size","view_offset","view_scale","mode3d","mvp"])
+        self._uloc_grid = _locs(self.grid_prog, ["mode3d","step","view_offset","view_scale","win_size","inv_mvp","cam_pos","world_h"])
+
+        # pre-compute cursor angles
+        _a = np.linspace(0, 2*math.pi, 64, endpoint=False)
+        self._cursor_cos = np.cos(_a)
+        self._cursor_sin = np.sin(_a)
 
         self._upload_palette()
 
@@ -171,29 +181,30 @@ class Renderer:
         D = sim.world_d if sim.mode3d else W
         step = float(10 ** math.ceil(math.log10(max(W, H, D) / 10)))
         glUseProgram(self.grid_prog)
-        u = lambda name: glGetUniformLocation(self.grid_prog, name)
-        glUniform1i(u("mode3d"), 1 if sim.mode3d else 0)
-        glUniform1f(u("step"), step)
-        glUniform2f(u("view_offset"), view_offset[0], view_offset[1])
-        glUniform1f(u("view_scale"), view_scale)
-        glUniform2f(u("win_size"), float(win_w), float(win_h))
+        u = self._uloc_grid
+        glUniform1i(u["mode3d"], 1 if sim.mode3d else 0)
+        glUniform1f(u["step"], step)
+        glUniform2f(u["view_offset"], view_offset[0], view_offset[1])
+        glUniform1f(u["view_scale"], view_scale)
+        glUniform2f(u["win_size"], float(win_w), float(win_h))
         if sim.mode3d and mvp is not None and cam_pos is not None:
             inv = np.linalg.inv(mvp.reshape(4,4).T).T.flatten().astype(np.float32)
-            glUniformMatrix4fv(u("inv_mvp"), 1, GL_FALSE, inv)
-            glUniform3f(u("cam_pos"), *cam_pos)
-            glUniform1f(u("world_h"), float(sim.world_h))
+            glUniformMatrix4fv(u["inv_mvp"], 1, GL_FALSE, inv)
+            glUniform3f(u["cam_pos"], *cam_pos)
+            glUniform1f(u["world_h"], float(sim.world_h))
         glBindVertexArray(self.grid_vao)
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
         glBindVertexArray(0)
 
     def draw(self, sim, win_w, win_h, view_offset=(0.0,0.0), view_scale=1.0, mvp=None):
+        u = self._uloc_draw
         glUseProgram(self.prog)
-        glUniform2f(glGetUniformLocation(self.prog,"world_size"), float(win_w), float(win_h))
-        glUniform2f(glGetUniformLocation(self.prog,"view_offset"), view_offset[0], view_offset[1])
-        glUniform1f(glGetUniformLocation(self.prog,"view_scale"), view_scale)
-        glUniform1i(glGetUniformLocation(self.prog,"mode3d"), 1 if sim.mode3d else 0)
+        glUniform2f(u["world_size"], float(win_w), float(win_h))
+        glUniform2f(u["view_offset"], view_offset[0], view_offset[1])
+        glUniform1f(u["view_scale"], view_scale)
+        glUniform1i(u["mode3d"], 1 if sim.mode3d else 0)
         if sim.mode3d and mvp is not None:
-            glUniformMatrix4fv(glGetUniformLocation(self.prog,"mvp"), 1, GL_FALSE, mvp)
+            glUniformMatrix4fv(u["mvp"], 1, GL_FALSE, mvp)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, sim.get_particle_ssbo())
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, self.ssbo_palette)
         glBindVertexArray(self.vao)
@@ -202,9 +213,7 @@ class Renderer:
 
     def draw_cursor(self, wx, wy, radius, win_w, win_h, view_offset=(0.0,0.0), view_scale=1.0,
                     mode3d=False, brush3d_pos=None, mvp4x4=None):
-        N = 64
-        a = np.linspace(0, 2*math.pi, N, endpoint=False)
-        cos_a, sin_a = np.cos(a), np.sin(a)
+        cos_a, sin_a = self._cursor_cos, self._cursor_sin
         if mode3d and brush3d_pos is not None and mvp4x4 is not None:
             bx, by, bz = brush3d_pos
             clip_c = mvp4x4 @ np.array([bx, by, bz, 1.0], dtype=np.float32)
@@ -225,5 +234,5 @@ class Renderer:
 
         glUseProgram(self.cursor_prog)
         glBindVertexArray(self.cursor_vao)
-        glDrawArrays(GL_LINE_LOOP, 0, N)
+        glDrawArrays(GL_LINE_LOOP, 0, len(self._cursor_cos))
         glBindVertexArray(0)
