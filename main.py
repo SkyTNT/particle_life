@@ -95,7 +95,7 @@ def main():
         if imgui.get_io().want_capture_mouse:
             return
         if sim.mode3d:
-            brush_dist[0] = max(50.0, brush_dist[0] * (1.1 ** -dy))
+            brush_dist[0] = max(50.0, brush_dist[0] * (1.1 ** dy))
             return
         mx, my = glfw.get_cursor_pos(window)
         _, fh = glfw.get_framebuffer_size(window)
