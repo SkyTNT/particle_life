@@ -90,6 +90,18 @@ def main():
 
     sim.enter_3d = enter_3d
 
+    def reset_view():
+        nonlocal view_scale, cam_pos, cam_yaw, cam_pitch
+        if sim.mode3d:
+            cam_pos  = np.array([sim.world_w/2, sim.world_h/2, sim.world_d/2], dtype=np.float32)
+            cam_yaw  = -math.pi / 2
+            cam_pitch = 0.0
+        else:
+            view_offset[0] = view_offset[1] = 0.0
+            view_scale = 1.0
+
+    sim.reset_view = reset_view
+
     def on_scroll(window, dx, dy):
         nonlocal view_scale
         if imgui.get_io().want_capture_mouse:
