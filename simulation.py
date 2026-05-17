@@ -4,15 +4,15 @@ from OpenGL.GL import *
 _SIM_SRC = """
 #version 430
 layout(local_size_x = 64) in;
-struct Particle { float x, y, vx, vy; int color; float _p0,_p1,_p2; };
+struct Particle { float x, y, vx, vy; int color; float z, vz, _p2; };
 struct Rule     { float force, min_r, max_r, _pad; };
 layout(std430, binding=0) buffer Particles { Particle p[]; };
 layout(std430, binding=1) buffer Rules     { Rule rules[]; };
-uniform int num_particles, num_colors, wrap, world_mode;
-uniform float force_factor, friction_factor, repel, world_w, world_h, dt_scale, max_speed, max_accel;
+uniform int num_particles, num_colors, wrap, world_mode, mode3d;
+uniform float force_factor, friction_factor, repel, world_w, world_h, world_d, dt_scale, max_speed, max_accel;
 
 float get_force(float rule, float min_r, float max_r, float dist) {
-    float softened = max(dist, min_r * 0.1); // prevent force explosion at dist~0
+    float softened = max(dist, min_r * 0.1);
     if (softened < min_r) return (repel/min_r)*softened - repel;
     if (softened > max_r) return 0.0;
     float mid = (min_r+max_r)*0.5, slope = rule/(mid-min_r);
@@ -21,46 +21,50 @@ float get_force(float rule, float min_r, float max_r, float dist) {
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= uint(num_particles)) return;
-    float ax=0,ay=0, px=p[i].x, py=p[i].y; int ci=p[i].color;
+    float ax=0,ay=0,az=0, px=p[i].x, py=p[i].y, pz=p[i].z; int ci=p[i].color;
     for (int j=0; j<num_particles; j++) {
         if (j==int(i)) continue;
-        float dx=p[j].x-px, dy=p[j].y-py;
+        float dx=p[j].x-px, dy=p[j].y-py, dz=(mode3d==1)?(p[j].z-pz):0.0;
         if (world_mode==1) {
             if (dx> world_w*.5) dx-=world_w; if (dx<-world_w*.5) dx+=world_w;
             if (dy> world_h*.5) dy-=world_h; if (dy<-world_h*.5) dy+=world_h;
+            if (mode3d==1) { if (dz> world_d*.5) dz-=world_d; if (dz<-world_d*.5) dz+=world_d; }
         }
-        float dist=sqrt(dx*dx+dy*dy);
+        float dist=sqrt(dx*dx+dy*dy+dz*dz);
         Rule r=rules[ci*num_colors+p[j].color];
         if (dist>r.max_r) continue;
         float safe_dist = max(dist, r.min_r * 0.1);
         float f=get_force(r.force,r.min_r,r.max_r,dist);
-        ax+=dx/safe_dist*f; ay+=dy/safe_dist*f;
+        ax+=dx/safe_dist*f; ay+=dy/safe_dist*f; az+=dz/safe_dist*f;
     }
-    float a_len = length(vec2(ax, ay));
-    if (max_accel > 0.0 && a_len > max_accel) { ax *= max_accel/a_len; ay *= max_accel/a_len; }
+    float a_len = length(vec3(ax, ay, az));
+    if (max_accel > 0.0 && a_len > max_accel) { float s=max_accel/a_len; ax*=s; ay*=s; az*=s; }
     p[i].vx=p[i].vx*(1-friction_factor)+ax*force_factor;
     p[i].vy=p[i].vy*(1-friction_factor)+ay*force_factor;
+    if (mode3d==1) p[i].vz=p[i].vz*(1-friction_factor)+az*force_factor;
     if (max_speed > 0.0) {
-        float spd = length(vec2(p[i].vx, p[i].vy));
+        float spd = length(vec3(p[i].vx, p[i].vy, p[i].vz));
         float gamma = 1.0 / sqrt(1.0 + (spd/max_speed)*(spd/max_speed));
-        p[i].vx *= gamma; p[i].vy *= gamma;
+        p[i].vx *= gamma; p[i].vy *= gamma; p[i].vz *= gamma;
     }
     p[i].x+=p[i].vx*dt_scale; p[i].y+=p[i].vy*dt_scale;
+    if (mode3d==1) p[i].z+=p[i].vz*dt_scale;
     if (world_mode==1) {
         if (p[i].x<0) p[i].x+=world_w; if (p[i].x>world_w) p[i].x-=world_w;
         if (p[i].y<0) p[i].y+=world_h; if (p[i].y>world_h) p[i].y-=world_h;
+        if (mode3d==1) { if (p[i].z<0) p[i].z+=world_d; if (p[i].z>world_d) p[i].z-=world_d; }
     } else if (world_mode==0) {
         if (p[i].x<0||p[i].x>world_w){p[i].x-=p[i].vx; p[i].vx*=-1.8;}
         if (p[i].y<0||p[i].y>world_h){p[i].y-=p[i].vy; p[i].vy*=-1.8;}
+        if (mode3d==1&&(p[i].z<0||p[i].z>world_d)){p[i].z-=p[i].vz; p[i].vz*=-1.8;}
     }
-    // world_mode==2: infinite, no boundary
 }
 """
 
 _BRUSH_SRC = """
 #version 430
 layout(local_size_x = 64) in;
-struct Particle { float x, y, vx, vy; int color; float _p0,_p1,_p2; };
+struct Particle { float x, y, vx, vy; int color; float z, vz, _p2; };
 layout(std430, binding=0) buffer Particles { Particle p[]; };
 uniform int num_particles, wrap;
 uniform float brush_x, brush_y, brush_r, brush_vx, brush_vy, brush_force, world_w, world_h;
@@ -83,7 +87,7 @@ void main() {
 _ERASE_SRC = """
 #version 430
 layout(local_size_x = 64) in;
-struct Particle { float x, y, vx, vy; int color; float _p0,_p1,_p2; };
+struct Particle { float x, y, vx, vy; int color; float z, vz, _p2; };
 layout(std430, binding=0) buffer Particles  { Particle p[]; };
 layout(std430, binding=2) buffer KeepFlags  { uint keep[]; };
 layout(std430, binding=4) buffer EraseTypes { int erase_types[]; };
@@ -130,6 +134,7 @@ class Simulation:
         self.world_mode     = 1  # 0=bounce, 1=wrap, 2=infinite
         self.world_w        = 800.0
         self.world_h        = 600.0
+        self.world_d        = 800.0
         self.sim_speed      = 1.0
         self.substeps       = 1
         self.max_speed      = 0.0   # 0 = disabled
@@ -143,10 +148,11 @@ class Simulation:
         self.rand_max_r_range = [90.0, 150.0]
         self._ssbo_particles = self._ssbo_rules = self._ssbo_keep = None
         self._prog_sim = self._prog_brush = self._prog_erase = None
+        self.mode3d = False
         self._dtype = np.dtype([
             ('x',np.float32),('y',np.float32),
             ('vx',np.float32),('vy',np.float32),
-            ('color',np.int32),('_pad',np.float32,3),
+            ('color',np.int32),('z',np.float32),('vz',np.float32),('_p2',np.float32),
         ])
 
     _DEFAULTS = dict(
@@ -172,6 +178,7 @@ class Simulation:
         data = np.zeros(n, dtype=self._dtype)
         data['x']     = np.random.rand(n).astype(np.float32) * self.world_w
         data['y']     = np.random.rand(n).astype(np.float32) * self.world_h
+        data['z']     = np.random.rand(n).astype(np.float32) * self.world_d if self.mode3d else np.zeros(n, dtype=np.float32)
         data['color'] = np.random.randint(0, self.num_colors, n).astype(np.int32)
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, self._ssbo_particles)
         glBufferData(GL_SHADER_STORAGE_BUFFER, data.nbytes, data, GL_DYNAMIC_DRAW)
@@ -218,8 +225,10 @@ class Simulation:
         glUniform1f(u("repel"),          self.repel)
         glUniform1f(u("world_w"),        self.world_w)
         glUniform1f(u("world_h"),        self.world_h)
+        glUniform1f(u("world_d"),        self.world_d)
         glUniform1i(u("wrap"),           self.world_mode)
         glUniform1i(u("world_mode"),     self.world_mode)
+        glUniform1i(u("mode3d"),         1 if self.mode3d else 0)
         glUniform1f(u("dt_scale"),       dt_scale)
         glUniform1f(u("max_speed"),      self.max_speed)
         glUniform1f(u("max_accel"),      self.max_accel)

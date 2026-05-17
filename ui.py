@@ -57,6 +57,17 @@ def draw_ui(sim, tool, renderer):
     _, sim.substeps         = imgui.slider_int(  "Substeps",          sim.substeps,        1,    16)
     _, sim.max_speed        = imgui.slider_float("Max Speed (0=off)", sim.max_speed,       0.0,  20.0)
     _, sim.max_accel        = imgui.slider_float("Max Accel (0=off)", sim.max_accel,       0.0,  50.0)
+    imgui.text("Mode:")
+    imgui.same_line()
+    if imgui.radio_button("2D", not sim.mode3d):
+        if sim.mode3d:
+            sim.mode3d = False
+            sim.reset_particles()
+    imgui.same_line()
+    if imgui.radio_button("3D", sim.mode3d):
+        if not sim.mode3d:
+            sim.enter_3d()
+
     imgui.text("Boundary:")
     imgui.same_line()
     for mode, name in enumerate(["Bounce", "Wrap", "Infinite"]):
@@ -73,6 +84,11 @@ def draw_ui(sim, tool, renderer):
     if changed:
         sim.world_h = val
         sim.reset_particles()
+    if sim.mode3d:
+        changed, val = imgui.slider_float("World Depth", sim.world_d, 200.0, 5000.0)
+        if changed:
+            sim.world_d = val
+            sim.reset_particles()
 
     imgui.spacing()
     if imgui.button("Random Rules"):   sim.randomize_rules()

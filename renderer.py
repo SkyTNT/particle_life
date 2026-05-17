@@ -4,27 +4,38 @@ from OpenGL.GL import *
 
 VERT = """
 #version 430 core
-struct Particle { float x, y, vx, vy; int color; float _p0, _p1, _p2; };
+struct Particle { float x, y, vx, vy; int color; float z, vz, _p2; };
 layout(std430, binding=0) buffer Particles { Particle p[]; };
 layout(std430, binding=3) buffer Palette   { vec4 palette[]; };
 uniform vec2 world_size; uniform vec2 view_offset; uniform float view_scale;
+uniform int mode3d;
+uniform mat4 mvp;
 out vec3 vColor;
+out float vDepth;
 void main() {
     Particle pt = p[gl_VertexID];
-    vec2 sp = (vec2(pt.x,pt.y) + view_offset) * view_scale;
-    gl_Position = vec4(sp/world_size*2.0-1.0, 0.0, 1.0);
-    gl_PointSize = 4.0;
+    if (mode3d == 1) {
+        gl_Position = mvp * vec4(pt.x, pt.y, pt.z, 1.0);
+        gl_PointSize = max(1.0, 8000.0 / gl_Position.w);
+        vDepth = gl_Position.w;
+    } else {
+        vec2 sp = (vec2(pt.x,pt.y) + view_offset) * view_scale;
+        gl_Position = vec4(sp/world_size*2.0-1.0, 0.0, 1.0);
+        gl_PointSize = max(1.0, 4.0 * view_scale);
+        vDepth = 0.0;
+    }
     vColor = palette[pt.color].rgb;
 }
 """
 
 FRAG = """
 #version 430 core
-in vec3 vColor; out vec4 fragColor;
+in vec3 vColor; in float vDepth; out vec4 fragColor;
 void main() {
     vec2 c = gl_PointCoord*2.0-1.0;
     if (dot(c,c)>1.0) discard;
-    fragColor = vec4(vColor, 1.0);
+    float brightness = (vDepth > 0.0) ? clamp(8000.0 / vDepth, 0.1, 1.0) : 1.0;
+    fragColor = vec4(vColor * brightness, 1.0);
 }
 """
 
@@ -96,11 +107,14 @@ class Renderer:
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, self.ssbo_palette)
         glBufferData(GL_SHADER_STORAGE_BUFFER, self.palette.nbytes, self.palette, GL_DYNAMIC_DRAW)
 
-    def draw(self, sim, win_w, win_h, view_offset=(0.0,0.0), view_scale=1.0):
+    def draw(self, sim, win_w, win_h, view_offset=(0.0,0.0), view_scale=1.0, mvp=None):
         glUseProgram(self.prog)
         glUniform2f(glGetUniformLocation(self.prog,"world_size"), float(win_w), float(win_h))
         glUniform2f(glGetUniformLocation(self.prog,"view_offset"), view_offset[0], view_offset[1])
         glUniform1f(glGetUniformLocation(self.prog,"view_scale"), view_scale)
+        glUniform1i(glGetUniformLocation(self.prog,"mode3d"), 1 if sim.mode3d else 0)
+        if sim.mode3d and mvp is not None:
+            glUniformMatrix4fv(glGetUniformLocation(self.prog,"mvp"), 1, GL_FALSE, mvp)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, sim.get_particle_ssbo())
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, self.ssbo_palette)
         glBindVertexArray(self.vao)
