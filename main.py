@@ -33,7 +33,7 @@ def _look_at(eye, yaw, pitch):
     v[0,:3] = right; v[0,3] = -np.dot(right, eye)
     v[1,:3] = up;    v[1,3] = -np.dot(up, eye)
     v[2,:3] = -fwd;  v[2,3] =  np.dot(fwd, eye)
-    return v, fwd, right, up
+    return v
 
 
 def _unproject(sx, sy, w, h, mvp):
@@ -121,10 +121,13 @@ def main():
         last_time = now
 
         if sim.mode3d:
-            # WASD movement
-            _, fwd, right, up = _look_at(cam_pos, cam_yaw, cam_pitch)
+            # WASD movement (only need fwd/right, compute cheaply)
             if not io.want_capture_keyboard:
-                speed = sim.world_w * dt * 0.8
+                cy, sy = math.cos(cam_yaw), math.sin(cam_yaw)
+                cp     = math.cos(cam_pitch)
+                fwd    = np.array([cy*cp, math.sin(cam_pitch), sy*cp], dtype=np.float32)
+                right  = np.array([math.cos(cam_yaw - math.pi/2), 0, math.sin(cam_yaw - math.pi/2)], dtype=np.float32)
+                speed  = sim.world_w * dt * 0.8
                 if glfw.get_key(win, glfw.KEY_W)          == glfw.PRESS: cam_pos += fwd   * speed
                 if glfw.get_key(win, glfw.KEY_S)          == glfw.PRESS: cam_pos -= fwd   * speed
                 if glfw.get_key(win, glfw.KEY_A)          == glfw.PRESS: cam_pos -= right * speed
@@ -147,8 +150,8 @@ def main():
                     glfw.set_input_mode(win, glfw.CURSOR, glfw.CURSOR_NORMAL)
                 mouse_last = None
 
-            # build MVP after all camera updates
-            view, _, _, _ = _look_at(cam_pos, cam_yaw, cam_pitch)
+            # build MVP once after all camera updates
+            view   = _look_at(cam_pos, cam_yaw, cam_pitch)
             proj   = _perspective(60.0, w / h, 1.0, sim.world_w * 10)
             mvp4x4 = proj @ view
             mvp    = mvp4x4.T.flatten().astype(np.float32)
