@@ -214,7 +214,7 @@ def main():
             else:
                 brush_last = None
 
-        sub_dt = dt * sim.sim_speed * 60.0 / sim.substeps
+        sub_dt = dt * sim.sim_speed / sim.substeps
         sim.step_multi(sub_dt, sim.substeps)
 
         glViewport(0, 0, w, h)

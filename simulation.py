@@ -126,7 +126,7 @@ def _compile(src):
 
 class Simulation:
     def __init__(self):
-        self.num_particles  = 1500
+        self.num_particles  = 50000
         self.num_colors     = 6
         self.force_factor   = 1.0
         self.friction_factor= 0.3

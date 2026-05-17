@@ -42,7 +42,7 @@ def draw_ui(sim, tool, renderer):
     imgui.set_next_window_size(300, 500, imgui.FIRST_USE_EVER)
     imgui.begin("Particle Life Settings")
 
-    changed, val = imgui.slider_int("Particles", sim.num_particles, 100, 50000)
+    changed, val = imgui.slider_int("Particles", sim.num_particles, 100, 1000000)
     if changed:
         sim.num_particles = val
         sim.reset_particles()
@@ -53,8 +53,8 @@ def draw_ui(sim, tool, renderer):
         sim.reset_particles()
         sim.randomize_rules()
 
-    _, sim.force_factor     = imgui.slider_float("Force Factor",      sim.force_factor,    0.01, 3.0)
-    _, sim.friction_factor  = imgui.slider_float("Friction",          sim.friction_factor, 0.0,  1.0)
+    _, sim.force_factor     = imgui.slider_float("Force Factor",      sim.force_factor,    1.0,  200.0)
+    _, sim.friction_factor  = imgui.slider_float("Friction",          sim.friction_factor, 0.0,  0.5)
     _, sim.repel            = imgui.slider_float("Repel",             sim.repel,           0.1,  5.0)
     _, sim.sim_speed        = imgui.slider_float("Sim Speed",         sim.sim_speed,       0.1,  10.0)
     _, sim.substeps         = imgui.slider_int(  "Substeps",          sim.substeps,        1,    16)
