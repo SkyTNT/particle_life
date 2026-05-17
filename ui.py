@@ -77,6 +77,12 @@ def draw_ui(sim, tool, renderer):
             imgui.same_line()
 
     _, renderer.show_grid = imgui.checkbox("Show Grid", renderer.show_grid)
+    if sim.world_mode == 1:
+        imgui.same_line()
+        _, renderer.tile_wrap = imgui.checkbox("Tile Wrap", renderer.tile_wrap)
+    if sim.mode3d:
+        imgui.same_line()
+        _, renderer.fog = imgui.checkbox("Fog", renderer.fog)
 
     changed, val = imgui.slider_float("World Width",  sim.world_w, 200.0, 5000.0)
     if changed:

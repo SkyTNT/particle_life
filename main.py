@@ -210,7 +210,17 @@ def main():
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glEnable(GL_DEPTH_TEST) if sim.mode3d else glDisable(GL_DEPTH_TEST)
 
-        renderer.draw(sim, w, h, view_offset=view_offset, view_scale=view_scale, mvp=mvp)
+        # compute tile_range: how many copies needed to fill viewport
+        if sim.world_mode == 1 and renderer.tile_wrap:
+            if sim.mode3d:
+                fog_dist = -math.log(0.02) / 0.00015  # matches fog density in shader
+                tile_range = int(math.ceil(fog_dist / min(sim.world_w, sim.world_h, sim.world_d)))
+            else:
+                vw = w / view_scale; vh = h / view_scale
+                tile_range = max(1, int(math.ceil(max(vw/sim.world_w, vh/sim.world_h))) + 1)
+        else:
+            tile_range = 0
+        renderer.draw(sim, w, h, view_offset=view_offset, view_scale=view_scale, mvp=mvp, tile_range=tile_range)
         renderer.draw_grid(sim, w, h, view_offset=view_offset, view_scale=view_scale, mvp=mvp,
                            cam_pos=cam_pos if sim.mode3d else None)
 
