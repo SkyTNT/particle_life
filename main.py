@@ -76,6 +76,7 @@ def main():
     cam_pitch = 0.0
     rotating  = False
     bp        = cam_pos.copy()
+    locked_mx = locked_my = 0.0
     brush_dist = [sim.world_w * 0.3]
 
     def enter_3d():
@@ -143,6 +144,7 @@ def main():
             rotating = glfw.get_mouse_button(win, glfw.MOUSE_BUTTON_RIGHT) == glfw.PRESS and not io.want_capture_mouse
             if rotating:
                 if mouse_last is None:
+                    locked_mx, locked_my = mx, my
                     glfw.set_input_mode(win, glfw.CURSOR, glfw.CURSOR_DISABLED)
                 else:
                     cam_yaw   -= (mx - mouse_last[0]) * 0.003
@@ -161,8 +163,8 @@ def main():
             mvp    = mvp4x4.T.flatten().astype(np.float32)
 
             # brush position: screen center when rotating, else mouse
-            sx = w / 2 if rotating else mx
-            sy = h / 2 if rotating else my
+            sx = locked_mx if rotating else mx
+            sy = locked_my if rotating else my
             near_w = _unproject(sx, sy, w, h, mvp4x4)
             ray = near_w - cam_pos.astype(np.float64)
             ray /= np.linalg.norm(ray)
