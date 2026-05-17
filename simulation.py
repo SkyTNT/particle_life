@@ -135,7 +135,7 @@ class Simulation:
         self.world_mode     = 1  # 0=bounce, 1=wrap, 2=infinite
         self.world_w        = 800.0
         self.world_h        = 600.0
-        self.world_d        = 800.0
+        self.world_d        = 1600.0
         self.sim_speed      = 1.0
         self.substeps       = 1
         self.max_speed      = 0.0   # 0 = disabled
@@ -145,8 +145,8 @@ class Simulation:
         self.brush_colors   = set()  # empty = all colors (for paint: random; for erase: all)
 
         self.rand_force_range = [-1.0, 1.0]
-        self.rand_min_r_range = [30.0, 60.0]
-        self.rand_max_r_range = [90.0, 150.0]
+        self.rand_min_r_range = [12.0, 24.0]
+        self.rand_max_r_range = [32.0, 64.0]
         self._ssbo_particles = self._ssbo_rules = self._ssbo_keep = None
         self._prog_sim = self._prog_brush = self._prog_erase = None
         self.mode3d = False

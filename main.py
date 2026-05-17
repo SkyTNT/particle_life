@@ -81,8 +81,8 @@ def main():
 
     def enter_3d():
         nonlocal cam_pos, cam_yaw, cam_pitch
-        sim.world_w = sim.world_h = sim.world_d = 4000.0
-        cam_pos   = np.array([2000.0, 2000.0, 2000.0], dtype=np.float32)
+        sim.world_w = sim.world_h = sim.world_d = 1600.0
+        cam_pos   = np.array([800.0, 800.0, 800.0], dtype=np.float32)
         cam_yaw   = -math.pi / 2
         cam_pitch = 0.0
         sim.mode3d = True
