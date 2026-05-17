@@ -11,18 +11,10 @@ layout(std430, binding=5) buffer BinCount   { uint bin_count[]; };
 uniform int num_particles, grid_w, grid_h, grid_d, mode3d, world_mode;
 uniform float cell_size;
 int bin_of(Particle pt) {
-    int bx = int(floor(pt.x / cell_size));
-    int by = int(floor(pt.y / cell_size));
-    if (world_mode == 1) {
-        bx = (bx%grid_w+grid_w)%grid_w;
-        by = (by%grid_h+grid_h)%grid_h;
-    } else {
-        bx = clamp(bx, 0, grid_w-1);
-        by = clamp(by, 0, grid_h-1);
-    }
+    int bx = clamp(int(floor(pt.x / cell_size)), 0, grid_w-1);
+    int by = clamp(int(floor(pt.y / cell_size)), 0, grid_h-1);
     if (mode3d == 1) {
-        int bz = int(floor(pt.z / cell_size));
-        bz = (world_mode==1) ? (bz%grid_d+grid_d)%grid_d : clamp(bz, 0, grid_d-1);
+        int bz = clamp(int(floor(pt.z / cell_size)), 0, grid_d-1);
         return bz * grid_h * grid_w + by * grid_w + bx;
     }
     return by * grid_w + bx;
@@ -98,10 +90,10 @@ void main() {
     float px=me.x, py=me.y, pz=me.z; int ci=me.color;
     float ax=0, ay=0, az=0;
 
+    int cbx = clamp(int(floor(px/cell_size)), 0, grid_w-1);
+    int cby = clamp(int(floor(py/cell_size)), 0, grid_h-1);
+    int cbz = (mode3d==1) ? clamp(int(floor(pz/cell_size)), 0, grid_d-1) : 0;
     bool wrap = (world_mode==1);
-    int cbx = wrap ? (int(floor(px/cell_size))%grid_w+grid_w)%grid_w : clamp(int(floor(px/cell_size)), 0, grid_w-1);
-    int cby = wrap ? (int(floor(py/cell_size))%grid_h+grid_h)%grid_h : clamp(int(floor(py/cell_size)), 0, grid_h-1);
-    int cbz = (mode3d==1) ? (wrap ? (int(floor(pz/cell_size))%grid_d+grid_d)%grid_d : clamp(int(floor(pz/cell_size)), 0, grid_d-1)) : 0;
     int cs = cell_subdivisions;
 
     for (int dbz=-(mode3d==1?cs:0); dbz<=(mode3d==1?cs:0); dbz++) {
@@ -151,18 +143,13 @@ void main() {
     me.x+=me.vx*dt_scale; me.y+=me.vy*dt_scale;
     if (mode3d==1) me.z+=me.vz*dt_scale;
     if (world_mode==1) {
-        if (me.x < 0.0) me.x += world_w; else if (me.x >= world_w) me.x -= world_w;
-        if (me.y < 0.0) me.y += world_h; else if (me.y >= world_h) me.y -= world_h;
-        if (mode3d==1) { if (me.z < 0.0) me.z += world_d; else if (me.z >= world_d) me.z -= world_d; }
+        me.x = mod(me.x, world_w); if(me.x<0) me.x+=world_w;
+        me.y = mod(me.y, world_h); if(me.y<0) me.y+=world_h;
+        if(mode3d==1){me.z=mod(me.z,world_d);if(me.z<0)me.z+=world_d;}
     } else if (world_mode==0) {
-        if (me.x < 0.0) { me.x = 0.0; me.vx = abs(me.vx); }
-        else if (me.x > world_w) { me.x = world_w; me.vx = -abs(me.vx); }
-        if (me.y < 0.0) { me.y = 0.0; me.vy = abs(me.vy); }
-        else if (me.y > world_h) { me.y = world_h; me.vy = -abs(me.vy); }
-        if (mode3d==1) {
-            if (me.z < 0.0) { me.z = 0.0; me.vz = abs(me.vz); }
-            else if (me.z > world_d) { me.z = world_d; me.vz = -abs(me.vz); }
-        }
+        if(me.x<0||me.x>world_w){me.x-=me.vx;me.vx*=-1.8;}
+        if(me.y<0||me.y>world_h){me.y-=me.vy;me.vy*=-1.8;}
+        if(mode3d==1&&(me.z<0||me.z>world_d)){me.z-=me.vz;me.vz*=-1.8;}
     }
     sorted[i] = me;
 }
