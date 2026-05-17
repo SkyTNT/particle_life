@@ -138,7 +138,9 @@ class Simulation:
         self.brush_force    = 0.1
         self.brush_colors   = set()  # empty = all colors (for paint: random; for erase: all)
 
-        self.force_matrix = self.min_r_matrix = self.max_r_matrix = None
+        self.rand_force_range = [-1.0, 1.0]
+        self.rand_min_r_range = [30.0, 60.0]
+        self.rand_max_r_range = [90.0, 150.0]
         self._ssbo_particles = self._ssbo_rules = self._ssbo_keep = None
         self._prog_sim = self._prog_brush = self._prog_erase = None
         self._dtype = np.dtype([
@@ -185,9 +187,12 @@ class Simulation:
 
     def randomize_rules(self):
         n = self.num_colors
-        self.force_matrix = (np.random.rand(n,n)*2-1).astype(np.float32)
-        self.min_r_matrix = (np.random.rand(n,n)*30+30).astype(np.float32)
-        self.max_r_matrix = (np.random.rand(n,n)*60+90).astype(np.float32)
+        lo, hi = self.rand_force_range
+        self.force_matrix = (np.random.rand(n,n)*(hi-lo)+lo).astype(np.float32)
+        lo, hi = self.rand_min_r_range
+        self.min_r_matrix = (np.random.rand(n,n)*(hi-lo)+lo).astype(np.float32)
+        lo, hi = self.rand_max_r_range
+        self.max_r_matrix = (np.random.rand(n,n)*(hi-lo)+lo).astype(np.float32)
         if self._ssbo_rules is not None:
             self._upload_rules()
 

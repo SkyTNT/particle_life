@@ -83,6 +83,10 @@ def draw_ui(sim, tool, renderer):
     imgui.same_line()
     if imgui.button("Reset Params"):   sim.reset_params()
 
+    _, sim.rand_force_range = imgui.drag_float2("Force Range", *sim.rand_force_range, 0.01, -1.0, 1.0, "%.2f")
+    _, sim.rand_min_r_range = imgui.drag_float2("Min R Range", *sim.rand_min_r_range, 0.5,  1.0, 300.0, "%.0f")
+    _, sim.rand_max_r_range = imgui.drag_float2("Max R Range", *sim.rand_max_r_range, 0.5,  1.0, 300.0, "%.0f")
+
     imgui.spacing()
     imgui.separator()
     imgui.text("Tool (left click)")
