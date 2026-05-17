@@ -76,6 +76,7 @@ def main():
     cam_pitch = 0.0
     rotating  = False
     bp        = cam_pos.copy()
+    brush_dist = [sim.world_w * 0.3]
 
     def enter_3d():
         nonlocal cam_pos, cam_yaw, cam_pitch
@@ -90,7 +91,10 @@ def main():
 
     def on_scroll(window, dx, dy):
         nonlocal view_scale
-        if imgui.get_io().want_capture_mouse or sim.mode3d:
+        if imgui.get_io().want_capture_mouse:
+            return
+        if sim.mode3d:
+            brush_dist[0] = max(50.0, brush_dist[0] * (1.1 ** -dy))
             return
         mx, my = glfw.get_cursor_pos(window)
         _, fh = glfw.get_framebuffer_size(window)
@@ -162,7 +166,7 @@ def main():
             near_w = _unproject(sx, sy, w, h, mvp4x4)
             ray = near_w - cam_pos.astype(np.float64)
             ray /= np.linalg.norm(ray)
-            bp = (cam_pos + ray * sim.world_w * 0.3).astype(np.float32)
+            bp = (cam_pos + ray * brush_dist[0]).astype(np.float32)
 
             if glfw.get_mouse_button(win, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS and not io.want_capture_mouse:
                 bvx = (bp[0] - brush_last[0]) if brush_last else 0.0
