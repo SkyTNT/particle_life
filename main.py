@@ -38,8 +38,6 @@ def main():
     sim.world_h = float(mode.size.height)
     sim.init_gl()
 
-    FIXED_DT = 1.0 / 60.0
-    accumulator = 0.0
     last_time = glfw.get_time()
 
     view_offset = [0.0, 0.0]
@@ -103,12 +101,10 @@ def main():
         now = glfw.get_time()
         dt = min(now - last_time, 0.1)
         last_time = now
-        accumulator += dt * sim.sim_speed
-        steps = 0
-        while accumulator >= FIXED_DT and steps < 20:
-            sim.step(dt_scale=1.0)
-            accumulator -= FIXED_DT
-            steps += 1
+        frame_dt = dt * sim.sim_speed * 60.0
+        sub_dt = frame_dt / sim.substeps
+        for _ in range(sim.substeps):
+            sim.step(dt_scale=sub_dt)
 
         glViewport(0, 0, w, h)
         glClearColor(0.05, 0.05, 0.08, 1.0)
@@ -119,7 +115,7 @@ def main():
                              view_offset=view_offset, view_scale=view_scale)
 
         imgui.new_frame()
-        draw_ui(sim, tool)
+        draw_ui(sim, tool, renderer)
         imgui.render()
         impl.render(imgui.get_draw_data())
 

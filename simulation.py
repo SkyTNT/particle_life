@@ -12,10 +12,11 @@ uniform int num_particles, num_colors, wrap;
 uniform float force_factor, friction_factor, repel, world_w, world_h, dt_scale, max_speed, max_accel;
 
 float get_force(float rule, float min_r, float max_r, float dist) {
-    if (dist < min_r) return (repel/min_r)*dist - repel;
-    if (dist > max_r) return 0.0;
+    float softened = max(dist, min_r * 0.1); // prevent force explosion at dist~0
+    if (softened < min_r) return (repel/min_r)*softened - repel;
+    if (softened > max_r) return 0.0;
     float mid = (min_r+max_r)*0.5, slope = rule/(mid-min_r);
-    return -(slope*abs(dist-mid)) + rule;
+    return -(slope*abs(softened-mid)) + rule;
 }
 void main() {
     uint i = gl_GlobalInvocationID.x;
@@ -30,9 +31,10 @@ void main() {
         }
         float dist=sqrt(dx*dx+dy*dy);
         Rule r=rules[ci*num_colors+p[j].color];
-        if (dist<=0||dist>r.max_r) continue;
+        if (dist>r.max_r) continue;
+        float safe_dist = max(dist, r.min_r * 0.1);
         float f=get_force(r.force,r.min_r,r.max_r,dist);
-        ax+=dx/dist*f; ay+=dy/dist*f;
+        ax+=dx/safe_dist*f; ay+=dy/safe_dist*f;
     }
     float a_len = length(vec2(ax, ay));
     if (max_accel > 0.0 && a_len > max_accel) { ax *= max_accel/a_len; ay *= max_accel/a_len; }
@@ -122,6 +124,7 @@ class Simulation:
         self.world_w        = 800.0
         self.world_h        = 600.0
         self.sim_speed      = 1.0
+        self.substeps       = 1
         self.max_speed      = 0.0   # 0 = disabled
         self.max_accel      = 0.0   # 0 = disabled
         self.brush_radius   = 80.0
@@ -136,6 +139,16 @@ class Simulation:
             ('vx',np.float32),('vy',np.float32),
             ('color',np.int32),('_pad',np.float32,3),
         ])
+
+    _DEFAULTS = dict(
+        force_factor=1.0, friction_factor=0.3, repel=1.0,
+        sim_speed=1.0, substeps=1, max_speed=0.0, max_accel=0.0,
+        brush_radius=80.0, brush_force=0.1, brush_color=0,
+    )
+
+    def reset_params(self):
+        for k, v in self._DEFAULTS.items():
+            setattr(self, k, v)
 
     def init_gl(self):
         self._prog_sim   = _compile(_SIM_SRC)
