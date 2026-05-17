@@ -37,12 +37,12 @@ def draw_ui(sim, tool, renderer):
     imgui.set_next_window_size(300, 500, imgui.FIRST_USE_EVER)
     imgui.begin("Particle Life Settings")
 
-    changed, val = imgui.slider_int("Particles", sim.num_particles, 100, 5000)
+    changed, val = imgui.slider_int("Particles", sim.num_particles, 100, 50000)
     if changed:
         sim.num_particles = val
         sim.reset_particles()
 
-    changed, val = imgui.slider_int("Colors", sim.num_colors, 1, 8)
+    changed, val = imgui.slider_int("Colors", sim.num_colors, 1, 20)
     if changed:
         sim.num_colors = val
         sim.reset_particles()
@@ -55,7 +55,13 @@ def draw_ui(sim, tool, renderer):
     _, sim.substeps         = imgui.slider_int(  "Substeps",          sim.substeps,        1,    16)
     _, sim.max_speed        = imgui.slider_float("Max Speed (0=off)", sim.max_speed,       0.0,  20.0)
     _, sim.max_accel        = imgui.slider_float("Max Accel (0=off)", sim.max_accel,       0.0,  50.0)
-    _, sim.wrap             = imgui.checkbox("Wrap edges",            sim.wrap)
+    imgui.text("Boundary:")
+    imgui.same_line()
+    for mode, name in enumerate(["Bounce", "Wrap", "Infinite"]):
+        if imgui.radio_button(name, sim.world_mode == mode):
+            sim.world_mode = mode
+        if mode < 2:
+            imgui.same_line()
 
     changed, val = imgui.slider_float("World Width",  sim.world_w, 200.0, 5000.0)
     if changed:
@@ -87,25 +93,32 @@ def draw_ui(sim, tool, renderer):
     _, sim.brush_radius = imgui.slider_float("Brush Radius", sim.brush_radius, 10.0, 500.0)
     if tool[0] == 1:
         _, sim.brush_force = imgui.slider_float("Brush Force", sim.brush_force, 0.01, 1.0)
-    if tool[0] == 2:
-        imgui.text("Paint Color:")
-        imgui.same_line()
-        # -1 = random shown as white
-        r, g, b = (1.0, 1.0, 1.0) if sim.brush_color < 0 else tuple(renderer.palette[sim.brush_color, :3])
-        if imgui.color_button("##rnd", r, g, b, 1.0, 0, _SWATCH, _SWATCH):
-            sim.brush_color = -1
-        if imgui.is_item_hovered():
-            imgui.set_tooltip("Random")
+    if tool[0] in (2, 3):
+        label = "Paint Colors (empty=random):" if tool[0] == 2 else "Erase Colors (empty=all):"
+        imgui.text(label)
+        draw_list = imgui.get_window_draw_list()
         for ci in range(sim.num_colors):
-            imgui.same_line(spacing=2)
+            if ci > 0:
+                imgui.same_line(spacing=2)
             r, g, b = renderer.palette[ci, :3]
-            selected = sim.brush_color == ci
+            selected = ci in sim.brush_colors
+            imgui.push_id(f"bc{ci}")
+            if imgui.color_button("", float(r), float(g), float(b), 1.0, 0, _SWATCH, _SWATCH):
+                if selected:
+                    sim.brush_colors.discard(ci)
+                else:
+                    sim.brush_colors.add(ci)
+            # draw overlay after button so we know its screen position
+            x, y = imgui.get_item_rect_min()
+            x2, y2 = imgui.get_item_rect_max()
             if selected:
-                imgui.push_style_color(imgui.COLOR_BORDER, 1.0, 1.0, 1.0, 1.0)
-            if imgui.color_button(f"##pc{ci}", float(r), float(g), float(b), 1.0, 0, _SWATCH, _SWATCH):
-                sim.brush_color = ci
-            if selected:
-                imgui.pop_style_color()
+                draw_list.add_rect(x, y, x2, y2, imgui.get_color_u32_rgba(1,1,1,1), 0, 0, 2.5)
+            else:
+                draw_list.add_rect_filled(x, y, x2, y2, imgui.get_color_u32_rgba(0,0,0,0.5))
+            imgui.pop_id()
+        imgui.same_line(spacing=6)
+        if imgui.button("Clear"):
+            sim.brush_colors.clear()
 
     imgui.spacing()
     imgui.separator()

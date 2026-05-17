@@ -8,7 +8,7 @@ struct Particle { float x, y, vx, vy; int color; float _p0,_p1,_p2; };
 struct Rule     { float force, min_r, max_r, _pad; };
 layout(std430, binding=0) buffer Particles { Particle p[]; };
 layout(std430, binding=1) buffer Rules     { Rule rules[]; };
-uniform int num_particles, num_colors, wrap;
+uniform int num_particles, num_colors, wrap, world_mode;
 uniform float force_factor, friction_factor, repel, world_w, world_h, dt_scale, max_speed, max_accel;
 
 float get_force(float rule, float min_r, float max_r, float dist) {
@@ -25,7 +25,7 @@ void main() {
     for (int j=0; j<num_particles; j++) {
         if (j==int(i)) continue;
         float dx=p[j].x-px, dy=p[j].y-py;
-        if (wrap==1) {
+        if (world_mode==1) {
             if (dx> world_w*.5) dx-=world_w; if (dx<-world_w*.5) dx+=world_w;
             if (dy> world_h*.5) dy-=world_h; if (dy<-world_h*.5) dy+=world_h;
         }
@@ -46,13 +46,14 @@ void main() {
         p[i].vx *= gamma; p[i].vy *= gamma;
     }
     p[i].x+=p[i].vx*dt_scale; p[i].y+=p[i].vy*dt_scale;
-    if (wrap==1) {
+    if (world_mode==1) {
         if (p[i].x<0) p[i].x+=world_w; if (p[i].x>world_w) p[i].x-=world_w;
         if (p[i].y<0) p[i].y+=world_h; if (p[i].y>world_h) p[i].y-=world_h;
-    } else {
+    } else if (world_mode==0) {
         if (p[i].x<0||p[i].x>world_w){p[i].x-=p[i].vx; p[i].vx*=-1.8;}
         if (p[i].y<0||p[i].y>world_h){p[i].y-=p[i].vy; p[i].vy*=-1.8;}
     }
+    // world_mode==2: infinite, no boundary
 }
 """
 
@@ -83,9 +84,10 @@ _ERASE_SRC = """
 #version 430
 layout(local_size_x = 64) in;
 struct Particle { float x, y, vx, vy; int color; float _p0,_p1,_p2; };
-layout(std430, binding=0) buffer Particles { Particle p[]; };
-layout(std430, binding=2) buffer KeepFlags { uint keep[]; };
-uniform int num_particles, wrap;
+layout(std430, binding=0) buffer Particles  { Particle p[]; };
+layout(std430, binding=2) buffer KeepFlags  { uint keep[]; };
+layout(std430, binding=4) buffer EraseTypes { int erase_types[]; };
+uniform int num_particles, wrap, num_erase_types;
 uniform float brush_x, brush_y, brush_r, world_w, world_h;
 void main() {
     uint i = gl_GlobalInvocationID.x;
@@ -95,7 +97,11 @@ void main() {
         if (dx> world_w*.5) dx-=world_w; if (dx<-world_w*.5) dx+=world_w;
         if (dy> world_h*.5) dy-=world_h; if (dy<-world_h*.5) dy+=world_h;
     }
-    keep[i] = (dx*dx+dy*dy < brush_r*brush_r) ? 0u : 1u;
+    bool in_radius = dx*dx+dy*dy < brush_r*brush_r;
+    bool color_match = (num_erase_types == 0);
+    for (int k=0; k<num_erase_types; k++)
+        if (p[i].color == erase_types[k]) { color_match = true; break; }
+    keep[i] = (in_radius && color_match) ? 0u : 1u;
 }
 """
 
@@ -121,6 +127,7 @@ class Simulation:
         self.friction_factor= 0.3
         self.repel          = 1.0
         self.wrap           = True
+        self.world_mode     = 1  # 0=bounce, 1=wrap, 2=infinite
         self.world_w        = 800.0
         self.world_h        = 600.0
         self.sim_speed      = 1.0
@@ -129,7 +136,7 @@ class Simulation:
         self.max_accel      = 0.0   # 0 = disabled
         self.brush_radius   = 80.0
         self.brush_force    = 0.1
-        self.brush_color    = 0   # -1 = random
+        self.brush_colors   = set()  # empty = all colors (for paint: random; for erase: all)
 
         self.force_matrix = self.min_r_matrix = self.max_r_matrix = None
         self._ssbo_particles = self._ssbo_rules = self._ssbo_keep = None
@@ -154,7 +161,7 @@ class Simulation:
         self._prog_sim   = _compile(_SIM_SRC)
         self._prog_brush = _compile(_BRUSH_SRC)
         self._prog_erase = _compile(_ERASE_SRC)
-        self._ssbo_particles, self._ssbo_rules, self._ssbo_keep = glGenBuffers(3)
+        self._ssbo_particles, self._ssbo_rules, self._ssbo_keep, self._ssbo_erase_types = glGenBuffers(4)
         self.randomize_rules()
         self.reset_particles()
 
@@ -206,7 +213,8 @@ class Simulation:
         glUniform1f(u("repel"),          self.repel)
         glUniform1f(u("world_w"),        self.world_w)
         glUniform1f(u("world_h"),        self.world_h)
-        glUniform1i(u("wrap"),           1 if self.wrap else 0)
+        glUniform1i(u("wrap"),           self.world_mode)
+        glUniform1i(u("world_mode"),     self.world_mode)
         glUniform1f(u("dt_scale"),       dt_scale)
         glUniform1f(u("max_speed"),      self.max_speed)
         glUniform1f(u("max_accel"),      self.max_accel)
@@ -218,7 +226,7 @@ class Simulation:
     def _set_brush_uniforms(self, prog, wx, wy, vx, vy):
         u = lambda n: self._u(prog, n)
         glUniform1i(u("num_particles"), self.num_particles)
-        glUniform1i(u("wrap"),          1 if self.wrap else 0)
+        glUniform1i(u("wrap"),          self.world_mode)
         glUniform1f(u("brush_x"),       wx)
         glUniform1f(u("brush_y"),       wy)
         glUniform1f(u("brush_r"),       self.brush_radius)
@@ -238,28 +246,30 @@ class Simulation:
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
 
     def apply_eraser(self, wx, wy):
-        """Remove particles within brush radius."""
         n = self.num_particles
-        # allocate keep-flags buffer
         keep_init = np.ones(n, dtype=np.uint32)
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, self._ssbo_keep)
         glBufferData(GL_SHADER_STORAGE_BUFFER, keep_init.nbytes, keep_init, GL_DYNAMIC_DRAW)
 
+        types = np.array(sorted(self.brush_colors), dtype=np.int32) if self.brush_colors else np.zeros(0, dtype=np.int32)
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, self._ssbo_erase_types)
+        glBufferData(GL_SHADER_STORAGE_BUFFER, max(types.nbytes, 4), types if len(types) else np.zeros(1, dtype=np.int32), GL_DYNAMIC_DRAW)
+
         glUseProgram(self._prog_erase)
         self._set_brush_uniforms(self._prog_erase, wx, wy, 0, 0)
+        glUniform1i(glGetUniformLocation(self._prog_erase, "num_erase_types"), len(types))
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, self._ssbo_particles)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, self._ssbo_keep)
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, self._ssbo_erase_types)
         glDispatchCompute((n+63)//64, 1, 1)
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
 
-        # read back flags and compact on CPU
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, self._ssbo_keep)
         flags = np.frombuffer(glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, n*4), dtype=np.uint32).copy()
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, self._ssbo_particles)
         particles = np.frombuffer(
             glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, n * self._dtype.itemsize),
             dtype=self._dtype).copy()
-
         kept = particles[flags == 1]
         self.num_particles = len(kept)
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, self._ssbo_particles)
@@ -272,8 +282,8 @@ class Simulation:
         data = np.zeros(count, dtype=self._dtype)
         data['x'] = wx + np.cos(angles) * radii
         data['y'] = wy + np.sin(angles) * radii
-        color = self.brush_color if self.brush_color >= 0 else np.random.randint(0, self.num_colors)
-        data['color'] = color
+        color_pool = list(self.brush_colors) if self.brush_colors else list(range(self.num_colors))
+        data['color'] = [color_pool[np.random.randint(len(color_pool))] for _ in range(count)]
 
         # append to existing buffer
         n_old = self.num_particles
