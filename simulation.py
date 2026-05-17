@@ -66,21 +66,22 @@ _BRUSH_SRC = """
 layout(local_size_x = 64) in;
 struct Particle { float x, y, vx, vy; int color; float z, vz, _p2; };
 layout(std430, binding=0) buffer Particles { Particle p[]; };
-uniform int num_particles, wrap;
-uniform float brush_x, brush_y, brush_r, brush_vx, brush_vy, brush_force, world_w, world_h;
+uniform int num_particles, wrap, mode3d;
+uniform float brush_x, brush_y, brush_z, brush_r, brush_vx, brush_vy, brush_force, world_w, world_h;
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= uint(num_particles)) return;
-    float dx=p[i].x-brush_x, dy=p[i].y-brush_y;
+    float dx=p[i].x-brush_x, dy=p[i].y-brush_y, dz=(mode3d==1)?(p[i].z-brush_z):0.0;
     if (wrap==1) {
         if (dx> world_w*.5) dx-=world_w; if (dx<-world_w*.5) dx+=world_w;
         if (dy> world_h*.5) dy-=world_h; if (dy<-world_h*.5) dy+=world_h;
     }
-    float distSq=dx*dx+dy*dy;
+    float distSq=dx*dx+dy*dy+dz*dz;
     if (distSq>=brush_r*brush_r||distSq<=0) return;
     float dist=sqrt(distSq), t=1.0-smoothstep(0.0,1.0,dist/brush_r);
     p[i].vx += dx/dist*brush_force*t*500.0 + brush_vx*t*40.0;
     p[i].vy += dy/dist*brush_force*t*500.0 + brush_vy*t*40.0;
+    if (mode3d==1) p[i].vz += dz/dist*brush_force*t*500.0;
 }
 """
 
@@ -91,17 +92,17 @@ struct Particle { float x, y, vx, vy; int color; float z, vz, _p2; };
 layout(std430, binding=0) buffer Particles  { Particle p[]; };
 layout(std430, binding=2) buffer KeepFlags  { uint keep[]; };
 layout(std430, binding=4) buffer EraseTypes { int erase_types[]; };
-uniform int num_particles, wrap, num_erase_types;
-uniform float brush_x, brush_y, brush_r, world_w, world_h;
+uniform int num_particles, wrap, num_erase_types, mode3d;
+uniform float brush_x, brush_y, brush_z, brush_r, world_w, world_h;
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= uint(num_particles)) return;
-    float dx=p[i].x-brush_x, dy=p[i].y-brush_y;
+    float dx=p[i].x-brush_x, dy=p[i].y-brush_y, dz=(mode3d==1)?(p[i].z-brush_z):0.0;
     if (wrap==1) {
         if (dx> world_w*.5) dx-=world_w; if (dx<-world_w*.5) dx+=world_w;
         if (dy> world_h*.5) dy-=world_h; if (dy<-world_h*.5) dy+=world_h;
     }
-    bool in_radius = dx*dx+dy*dy < brush_r*brush_r;
+    bool in_radius = dx*dx+dy*dy+dz*dz < brush_r*brush_r;
     bool color_match = (num_erase_types == 0);
     for (int k=0; k<num_erase_types; k++)
         if (p[i].color == erase_types[k]) { color_match = true; break; }
@@ -237,12 +238,14 @@ class Simulation:
         glDispatchCompute((self.num_particles+63)//64, 1, 1)
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
 
-    def _set_brush_uniforms(self, prog, wx, wy, vx, vy):
+    def _set_brush_uniforms(self, prog, wx, wy, vx, vy, wz=0.0):
         u = lambda n: self._u(prog, n)
         glUniform1i(u("num_particles"), self.num_particles)
         glUniform1i(u("wrap"),          self.world_mode)
+        glUniform1i(u("mode3d"),        1 if self.mode3d else 0)
         glUniform1f(u("brush_x"),       wx)
         glUniform1f(u("brush_y"),       wy)
+        glUniform1f(u("brush_z"),       wz)
         glUniform1f(u("brush_r"),       self.brush_radius)
         glUniform1f(u("world_w"),       self.world_w)
         glUniform1f(u("world_h"),       self.world_h)
@@ -251,15 +254,14 @@ class Simulation:
             glUniform1f(u("brush_vy"),      vy)
             glUniform1f(u("brush_force"),   self.brush_force)
 
-    def apply_brush(self, wx, wy, vx=0.0, vy=0.0):
-        """Push particles away from (wx,wy)."""
+    def apply_brush(self, wx, wy, vx=0.0, vy=0.0, wz=0.0):
         glUseProgram(self._prog_brush)
-        self._set_brush_uniforms(self._prog_brush, wx, wy, vx, vy)
+        self._set_brush_uniforms(self._prog_brush, wx, wy, vx, vy, wz)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, self._ssbo_particles)
         glDispatchCompute((self.num_particles+63)//64, 1, 1)
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
 
-    def apply_eraser(self, wx, wy):
+    def apply_eraser(self, wx, wy, wz=0.0):
         n = self.num_particles
         keep_init = np.ones(n, dtype=np.uint32)
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, self._ssbo_keep)
@@ -270,7 +272,7 @@ class Simulation:
         glBufferData(GL_SHADER_STORAGE_BUFFER, max(types.nbytes, 4), types if len(types) else np.zeros(1, dtype=np.int32), GL_DYNAMIC_DRAW)
 
         glUseProgram(self._prog_erase)
-        self._set_brush_uniforms(self._prog_erase, wx, wy, 0, 0)
+        self._set_brush_uniforms(self._prog_erase, wx, wy, 0, 0, wz)
         glUniform1i(glGetUniformLocation(self._prog_erase, "num_erase_types"), len(types))
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, self._ssbo_particles)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, self._ssbo_keep)
@@ -289,13 +291,13 @@ class Simulation:
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, self._ssbo_particles)
         glBufferData(GL_SHADER_STORAGE_BUFFER, kept.nbytes, kept, GL_DYNAMIC_DRAW)
 
-    def paint_particles(self, wx, wy, count=10):
-        """Add particles near (wx,wy)."""
+    def paint_particles(self, wx, wy, wz=0.0, count=10):
         angles = np.random.rand(count) * 2 * np.pi
         radii  = np.random.rand(count) * self.brush_radius
         data = np.zeros(count, dtype=self._dtype)
         data['x'] = wx + np.cos(angles) * radii
         data['y'] = wy + np.sin(angles) * radii
+        data['z'] = wz + (np.random.rand(count) - 0.5) * self.brush_radius * 2 if self.mode3d else 0.0
         color_pool = list(self.brush_colors) if self.brush_colors else list(range(self.num_colors))
         data['color'] = [color_pool[np.random.randint(len(color_pool))] for _ in range(count)]
 

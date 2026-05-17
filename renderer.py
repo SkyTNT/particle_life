@@ -121,16 +121,33 @@ class Renderer:
         glDrawArrays(GL_POINTS, 0, sim.num_particles)
         glBindVertexArray(0)
 
-    def draw_cursor(self, wx, wy, radius, win_w, win_h, view_offset=(0.0,0.0), view_scale=1.0):
-        import numpy as np
+    def draw_cursor(self, wx, wy, radius, win_w, win_h, view_offset=(0.0,0.0), view_scale=1.0,
+                    mode3d=False, brush3d_pos=None, mvp4x4=None):
         N = 64
-        angles = [2*math.pi*i/N for i in range(N)]
-        # world-space circle -> screen -> NDC
-        pts = []
-        for a in angles:
-            sx = (wx + math.cos(a)*radius + view_offset[0]) * view_scale
-            sy = (wy + math.sin(a)*radius + view_offset[1]) * view_scale
-            pts += [sx/win_w*2-1, sy/win_h*2-1]
+        angles = np.linspace(0, 2*math.pi, N, endpoint=False)
+        if mode3d and brush3d_pos is not None and mvp4x4 is not None:
+            bx, by, bz = brush3d_pos
+            # billboard: use camera right/up axes from view matrix (first two rows of mvp4x4)
+            right = mvp4x4[0, :3]
+            up    = mvp4x4[1, :3]
+            right = right / (np.linalg.norm(right) + 1e-8)
+            up    = up    / (np.linalg.norm(up)    + 1e-8)
+            pts = []
+            for a in angles:
+                world_pt = np.array([bx, by, bz], dtype=np.float32) \
+                           + right * (math.cos(a) * radius) \
+                           + up    * (math.sin(a) * radius)
+                clip = mvp4x4 @ np.array([*world_pt, 1.0], dtype=np.float32)
+                if clip[3] <= 0:
+                    pts += [0.0, 0.0]
+                    continue
+                pts += [clip[0]/clip[3], clip[1]/clip[3]]
+        else:
+            pts = []
+            for a in angles:
+                sx = (wx + math.cos(a)*radius + view_offset[0]) * view_scale
+                sy = (wy + math.sin(a)*radius + view_offset[1]) * view_scale
+                pts += [sx/win_w*2-1, sy/win_h*2-1]
         verts = np.array(pts, dtype=np.float32)
 
         glBindBuffer(GL_ARRAY_BUFFER, self.cursor_vbo)

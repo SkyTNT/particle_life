@@ -162,6 +162,38 @@ def main():
             proj = _perspective(60.0, w / h, 1.0, sim.world_w * 10)
             view = _look_at(cam_pos, cam_yaw, cam_pitch)
             mvp  = (proj @ view).T.flatten().astype(np.float32)
+            mvp4x4 = (proj @ view).astype(np.float32)  # row-major for Python matmul
+
+            # compute brush position from mouse ray (always, for cursor display)
+            ndc_x = (mx / w) * 2.0 - 1.0
+            ndc_y = 1.0 - (my / h) * 2.0
+            aspect = w / h
+            cy, sy = math.cos(cam_yaw), math.sin(cam_yaw)
+            cp, sp = math.cos(cam_pitch), math.sin(cam_pitch)
+            fwd   = np.array([cy*cp, sp, sy*cp], dtype=np.float32)
+            right = np.array([math.cos(cam_yaw - math.pi/2), 0, math.sin(cam_yaw - math.pi/2)], dtype=np.float32)
+            up    = np.cross(right, fwd)
+            half_h = math.tan(math.radians(60.0) / 2)
+            ray = fwd + right * (ndc_x * half_h * aspect) + up * (ndc_y * half_h)
+            ray = ray / np.linalg.norm(ray)
+            brush_dist = sim.world_w * 0.3
+            bp = cam_pos + ray * brush_dist
+
+            # 3D brush: ray from camera through mouse cursor
+            painting3d = (glfw.get_mouse_button(win, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS
+                          and not io.want_capture_mouse)
+            if painting3d:
+                bvx = (bp[0] - brush_last[0]) if brush_last else 0.0
+                bvy = (bp[1] - brush_last[1]) if brush_last else 0.0
+                if tool[0] == 1:
+                    sim.apply_brush(bp[0], bp[1], bvx, bvy, bp[2])
+                elif tool[0] == 2:
+                    sim.paint_particles(bp[0], bp[1], bp[2])
+                elif tool[0] == 3:
+                    sim.apply_eraser(bp[0], bp[1], bp[2])
+                brush_last = (bp[0], bp[1])
+            else:
+                brush_last = None
         else:
             mvp = None
             wx, wy = screen_to_world(mx, my, h, view_offset, view_scale)
@@ -207,7 +239,10 @@ def main():
 
         renderer.draw(sim, w, h, view_offset=view_offset, view_scale=view_scale, mvp=mvp)
 
-        if not sim.mode3d:
+        if sim.mode3d:
+            renderer.draw_cursor(0, 0, sim.brush_radius, w, h,
+                                 mode3d=True, brush3d_pos=bp, mvp4x4=mvp4x4)
+        else:
             renderer.draw_cursor(wx, wy, sim.brush_radius, w, h,
                                  view_offset=view_offset, view_scale=view_scale)
 
