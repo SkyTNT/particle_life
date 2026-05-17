@@ -58,8 +58,8 @@ def draw_ui(sim, tool, renderer):
     _, sim.repel            = imgui.slider_float("Repel",             sim.repel,           0.1,  5.0)
     _, sim.sim_speed        = imgui.slider_float("Sim Speed",         sim.sim_speed,       0.1,  10.0)
     _, sim.substeps         = imgui.slider_int(  "Substeps",          sim.substeps,        1,    16)
-    _, sim.max_speed        = imgui.slider_float("Max Speed (0=off)", sim.max_speed,       0.0,  20.0)
-    _, sim.max_accel        = imgui.slider_float("Max Accel (0=off)", sim.max_accel,       0.0,  50.0)
+    _, sim.max_speed        = imgui.slider_float("Max Speed (0=off)", sim.max_speed,       0.0,  100.0)
+    _, sim.max_accel        = imgui.slider_float("Max Accel (0=off)", sim.max_accel,       0.0,  100.0)
     imgui.text("Mode:")
     imgui.same_line()
     if imgui.radio_button("2D", not sim.mode3d):
