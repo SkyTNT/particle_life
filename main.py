@@ -28,7 +28,7 @@ def _look_at(eye, yaw, pitch):
     cp, sp = math.cos(pitch), math.sin(pitch)
     fwd   = np.array([cy*cp, sp, sy*cp], dtype=np.float32)
     right = np.array([math.cos(yaw - math.pi/2), 0, math.sin(yaw - math.pi/2)], dtype=np.float32)
-    up    = np.cross(right, fwd)
+    up    = np.cross(fwd, right)
     v = np.eye(4, dtype=np.float32)
     v[0,:3] = right; v[0,3] = -np.dot(right, eye)
     v[1,:3] = up;    v[1,3] = -np.dot(up, eye)
@@ -147,7 +147,7 @@ def main():
                 else:
                     cam_yaw   -= (mx - mouse_last[0]) * 0.003
                     cam_pitch  = max(-math.pi/2+0.01, min(math.pi/2-0.01,
-                                    cam_pitch + (my - mouse_last[1]) * 0.003))
+                                    cam_pitch - (my - mouse_last[1]) * 0.003))
                 mouse_last = (mx, my)
             else:
                 if mouse_last is not None:
@@ -210,6 +210,8 @@ def main():
         glEnable(GL_DEPTH_TEST) if sim.mode3d else glDisable(GL_DEPTH_TEST)
 
         renderer.draw(sim, w, h, view_offset=view_offset, view_scale=view_scale, mvp=mvp)
+        renderer.draw_grid(sim, w, h, view_offset=view_offset, view_scale=view_scale, mvp=mvp,
+                           cam_pos=cam_pos if sim.mode3d else None)
 
         if sim.mode3d:
             renderer.draw_cursor(0, 0, sim.brush_radius, w, h,

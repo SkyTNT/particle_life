@@ -39,6 +39,57 @@ void main() {
 }
 """
 
+GRID_VERT = """
+#version 430 core
+out vec2 uv;
+void main() {
+    vec2 pos = vec2((gl_VertexID & 1) * 2 - 1, (gl_VertexID >> 1) * 2 - 1);
+    uv = pos;
+    gl_Position = vec4(pos, 0.0, 1.0);
+}
+"""
+GRID_FRAG = """
+#version 430 core
+in vec2 uv;
+out vec4 fragColor;
+uniform int mode3d;
+uniform float step;
+uniform vec2 view_offset; uniform float view_scale; uniform vec2 win_size;
+uniform mat4 inv_mvp;
+uniform vec3 cam_pos;
+uniform float world_h;
+float gridline(vec2 p) {
+    vec2 g = abs(fract(p / step - 0.5) - 0.5) / fwidth(p / step);
+    return 1.0 - min(min(g.x, g.y), 1.0);
+}
+void main() {
+    float alpha;
+    if (mode3d == 1) {
+        vec4 near = inv_mvp * vec4(uv, -1.0, 1.0);
+        vec4 far  = inv_mvp * vec4(uv,  1.0, 1.0);
+        near /= near.w; far /= far.w;
+        vec3 ray = normalize(near.xyz - far.xyz);
+        // single ground plane at y=0
+        float best_alpha = 0.0;
+        if (abs(ray.y) > 1e-4) {
+            float t = -cam_pos.y / ray.y;
+            if (t > 0.0) {
+                vec3 hit = cam_pos + ray * t;
+                float fade = 1.0 - clamp(t / (step * 30.0), 0.0, 1.0);
+                best_alpha = gridline(hit.xz) * fade;
+            }
+        }
+        alpha = best_alpha;
+    } else {
+        vec2 screen = (uv + 1.0) * 0.5 * win_size;
+        vec2 world = screen / view_scale - view_offset;
+        alpha = gridline(world);
+    }
+    if (alpha < 0.01) discard;
+    fragColor = vec4(1.0, 1.0, 1.0, alpha * 0.3);
+}
+"""
+
 CURSOR_VERT = """
 #version 430 core
 layout(location=0) in vec2 pos;
@@ -79,9 +130,11 @@ DEFAULT_PALETTE = np.array([
 
 class Renderer:
     def __init__(self):
-        self.prog = self.cursor_prog = None
+        self.prog = self.cursor_prog = self.grid_prog = None
         self.vao = self.cursor_vao = self.cursor_vbo = self.ssbo_palette = None
+        self.grid_vao = self.grid_vbo = None
         self.palette = DEFAULT_PALETTE.copy()
+        self.show_grid = False
 
     def init_gl(self):
         self.prog = _compile_prog(VERT, FRAG)
@@ -101,11 +154,37 @@ class Renderer:
         glEnableVertexAttribArray(0)
         glBindVertexArray(0)
 
+        self.grid_prog = _compile_prog(GRID_VERT, GRID_FRAG)
+        self.grid_vao = glGenVertexArrays(1)  # empty VAO for attributeless draw
+
         self._upload_palette()
 
     def _upload_palette(self):
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, self.ssbo_palette)
         glBufferData(GL_SHADER_STORAGE_BUFFER, self.palette.nbytes, self.palette, GL_DYNAMIC_DRAW)
+
+    def draw_grid(self, sim, win_w, win_h, view_offset=(0.0,0.0), view_scale=1.0, mvp=None,
+                  cam_pos=None, **_):
+        if not self.show_grid:
+            return
+        W, H = sim.world_w, sim.world_h
+        D = sim.world_d if sim.mode3d else W
+        step = float(10 ** math.ceil(math.log10(max(W, H, D) / 10)))
+        glUseProgram(self.grid_prog)
+        u = lambda name: glGetUniformLocation(self.grid_prog, name)
+        glUniform1i(u("mode3d"), 1 if sim.mode3d else 0)
+        glUniform1f(u("step"), step)
+        glUniform2f(u("view_offset"), view_offset[0], view_offset[1])
+        glUniform1f(u("view_scale"), view_scale)
+        glUniform2f(u("win_size"), float(win_w), float(win_h))
+        if sim.mode3d and mvp is not None and cam_pos is not None:
+            inv = np.linalg.inv(mvp.reshape(4,4).T).T.flatten().astype(np.float32)
+            glUniformMatrix4fv(u("inv_mvp"), 1, GL_FALSE, inv)
+            glUniform3f(u("cam_pos"), *cam_pos)
+            glUniform1f(u("world_h"), float(sim.world_h))
+        glBindVertexArray(self.grid_vao)
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
+        glBindVertexArray(0)
 
     def draw(self, sim, win_w, win_h, view_offset=(0.0,0.0), view_scale=1.0, mvp=None):
         glUseProgram(self.prog)

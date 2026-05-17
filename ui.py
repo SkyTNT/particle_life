@@ -76,6 +76,8 @@ def draw_ui(sim, tool, renderer):
         if mode < 2:
             imgui.same_line()
 
+    _, renderer.show_grid = imgui.checkbox("Show Grid", renderer.show_grid)
+
     changed, val = imgui.slider_float("World Width",  sim.world_w, 200.0, 5000.0)
     if changed:
         sim.world_w = val
