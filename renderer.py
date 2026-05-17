@@ -122,26 +122,22 @@ class Renderer:
         glBindVertexArray(0)
 
     def draw_cursor(self, wx, wy, radius, win_w, win_h, view_offset=(0.0,0.0), view_scale=1.0,
-                    mode3d=False, brush3d_pos=None, mvp4x4=None):
+                    mode3d=False, brush3d_pos=None, mvp4x4=None, view4x4=None):
         N = 64
         angles = np.linspace(0, 2*math.pi, N, endpoint=False)
         if mode3d and brush3d_pos is not None and mvp4x4 is not None:
             bx, by, bz = brush3d_pos
-            # billboard: use camera right/up axes from view matrix (first two rows of mvp4x4)
-            right = mvp4x4[0, :3]
-            up    = mvp4x4[1, :3]
-            right = right / (np.linalg.norm(right) + 1e-8)
-            up    = up    / (np.linalg.norm(up)    + 1e-8)
+            clip_c = mvp4x4 @ np.array([bx, by, bz, 1.0], dtype=np.float32)
+            if clip_c[3] <= 0:
+                return
+            cx_ndc = clip_c[0] / clip_c[3]
+            cy_ndc = clip_c[1] / clip_c[3]
+            # fixed screen-space radius in pixels
+            r_px = 40.0
             pts = []
             for a in angles:
-                world_pt = np.array([bx, by, bz], dtype=np.float32) \
-                           + right * (math.cos(a) * radius) \
-                           + up    * (math.sin(a) * radius)
-                clip = mvp4x4 @ np.array([*world_pt, 1.0], dtype=np.float32)
-                if clip[3] <= 0:
-                    pts += [0.0, 0.0]
-                    continue
-                pts += [clip[0]/clip[3], clip[1]/clip[3]]
+                pts += [cx_ndc + math.cos(a) * r_px / win_w * 2.0,
+                        cy_ndc + math.sin(a) * r_px / win_h * 2.0]
         else:
             pts = []
             for a in angles:
