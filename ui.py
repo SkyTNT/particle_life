@@ -86,6 +86,11 @@ def draw_ui(sim, tool, renderer):
     if sim.mode3d:
         imgui.same_line()
         _, renderer.fog = imgui.checkbox("Fog", renderer.fog)
+    if sim.mode3d and renderer.fog:
+        _, renderer.fog_density = imgui.slider_float(
+            "Fog Density", renderer.fog_density, 0.0001, 0.005, "%.4f")
+    if sim.world_mode == 1 and renderer.tile_wrap and sim.mode3d:
+        _, renderer.tile_distance = imgui.slider_int("Tile Distance", renderer.tile_distance, 0, 8)
 
     changed, val = imgui.slider_float("World Width",  sim.world_w, 200.0, 5000.0)
     if changed:

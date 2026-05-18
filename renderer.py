@@ -7,26 +7,18 @@ VERT = """
 struct Particle { float x, y, vx, vy; int color; float z, vz, _p2; };
 layout(std430, binding=0) buffer Particles { Particle p[]; };
 layout(std430, binding=3) buffer Palette   { vec4 palette[]; };
+layout(std430, binding=8) buffer TileOffs  { vec4 tile_offsets[]; };
 uniform vec2 world_size; uniform vec2 view_offset; uniform float view_scale;
-uniform int mode3d, world_mode, tile_range;
+uniform int mode3d, world_mode, tile_count;
 uniform float world_w, world_h, world_d;
 uniform mat4 mvp;
 out vec3 vColor;
 out float vDepth;
 void main() {
     Particle pt = p[gl_VertexID];
-    int inst = gl_InstanceID;
-    vec3 offset = vec3(0.0);
-    if (world_mode == 1 && tile_range > 0) {
-        int n = 2*tile_range+1;
-        if (mode3d == 1) {
-            int ix = inst%n - tile_range, iy = (inst/n)%n - tile_range, iz = inst/(n*n) - tile_range;
-            offset = vec3(ix*world_w, iy*world_h, iz*world_d);
-        } else {
-            int ix = inst%n - tile_range, iy = inst/n - tile_range;
-            offset = vec3(ix*world_w, iy*world_h, 0.0);
-        }
-    }
+    vec3 offset = (world_mode == 1 && tile_count > 0)
+        ? tile_offsets[gl_InstanceID].xyz
+        : vec3(0.0);
     if (mode3d == 1) {
         gl_Position = mvp * vec4(pt.x+offset.x, pt.y+offset.y, pt.z+offset.z, 1.0);
         // cull instances behind camera or far outside frustum
@@ -51,10 +43,11 @@ FRAG = """
 #version 430 core
 in vec3 vColor; in float vDepth; out vec4 fragColor;
 uniform int fog_enabled;
+uniform float fog_density;
 void main() {
     vec2 c = gl_PointCoord*2.0-1.0;
     if (dot(c,c)>1.0) discard;
-    float brightness = (vDepth > 0.0 && fog_enabled == 1) ? exp(-vDepth * 0.00015) : 1.0;
+    float brightness = (vDepth > 0.0 && fog_enabled == 1) ? exp(-vDepth * fog_density) : 1.0;
     if (brightness < 0.02) discard;
     fragColor = vec4(vColor * brightness, 1.0);
 }
@@ -153,11 +146,14 @@ class Renderer:
     def __init__(self):
         self.prog = self.cursor_prog = self.grid_prog = None
         self.vao = self.cursor_vao = self.cursor_vbo = self.ssbo_palette = None
+        self.ssbo_tiles = None
         self.grid_vao = self.grid_vbo = None
         self.palette = DEFAULT_PALETTE.copy()
         self.show_grid = False
         self.tile_wrap = False
+        self.tile_distance = 3   # tiles to include in each direction around camera
         self.fog = True
+        self.fog_density = 0.0006
 
     def init_gl(self):
         self.prog = _compile_prog(VERT, FRAG)
@@ -165,6 +161,7 @@ class Renderer:
         self.vao = glGenVertexArrays(1)
         self.cursor_vbo = glGenBuffers(1)
         self.ssbo_palette = glGenBuffers(1)
+        self.ssbo_tiles = glGenBuffers(1)
         glEnable(GL_PROGRAM_POINT_SIZE)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
@@ -182,7 +179,7 @@ class Renderer:
 
         def _locs(prog, names):
             return {n: glGetUniformLocation(prog, n) for n in names}
-        self._uloc_draw = _locs(self.prog, ["world_size","view_offset","view_scale","mode3d","mvp","world_mode","world_w","world_h","world_d","tile_range","fog_enabled"])
+        self._uloc_draw = _locs(self.prog, ["world_size","view_offset","view_scale","mode3d","mvp","world_mode","world_w","world_h","world_d","tile_count","fog_enabled","fog_density"])
         self._uloc_grid = _locs(self.grid_prog, ["mode3d","step","view_offset","view_scale","win_size","inv_mvp","cam_pos","world_h"])
 
         # pre-compute cursor angles
@@ -219,7 +216,7 @@ class Renderer:
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
         glBindVertexArray(0)
 
-    def draw(self, sim, win_w, win_h, view_offset=(0.0,0.0), view_scale=1.0, mvp=None, tile_range=1):
+    def draw(self, sim, win_w, win_h, view_offset=(0.0,0.0), view_scale=1.0, mvp=None, tile_offsets=None):
         u = self._uloc_draw
         glUseProgram(self.prog)
         glUniform2f(u["world_size"], float(win_w), float(win_h))
@@ -230,18 +227,29 @@ class Renderer:
         glUniform1f(u["world_w"], sim.world_w)
         glUniform1f(u["world_h"], sim.world_h)
         glUniform1f(u["world_d"], sim.world_d)
-        glUniform1i(u["tile_range"], tile_range if (sim.world_mode == 1 and self.tile_wrap) else 0)
         glUniform1i(u["fog_enabled"], 1 if (sim.mode3d and self.fog) else 0)
+        glUniform1f(u["fog_density"], self.fog_density)
         if sim.mode3d and mvp is not None:
             glUniformMatrix4fv(u["mvp"], 1, GL_FALSE, mvp)
+
+        tiling = (sim.world_mode == 1 and self.tile_wrap
+                  and tile_offsets is not None and len(tile_offsets) > 0)
+        if tiling:
+            n_tiles = len(tile_offsets)
+            offs4 = np.zeros((n_tiles, 4), dtype=np.float32)
+            offs4[:, :3] = tile_offsets
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, self.ssbo_tiles)
+            glBufferData(GL_SHADER_STORAGE_BUFFER, offs4.nbytes, offs4, GL_DYNAMIC_DRAW)
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 8, self.ssbo_tiles)
+            glUniform1i(u["tile_count"], n_tiles)
+            instances = n_tiles
+        else:
+            glUniform1i(u["tile_count"], 0)
+            instances = 1
+
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, sim.get_particle_ssbo())
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, self.ssbo_palette)
         glBindVertexArray(self.vao)
-        if sim.world_mode == 1 and self.tile_wrap and tile_range > 0:
-            n = 2 * tile_range + 1
-            instances = n ** 3 if sim.mode3d else n ** 2
-        else:
-            instances = 1
         glDrawArraysInstanced(GL_POINTS, 0, sim.num_particles, instances)
         glBindVertexArray(0)
 

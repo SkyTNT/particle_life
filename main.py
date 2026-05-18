@@ -42,6 +42,49 @@ def _unproject(sx, sy, w, h, mvp):
     return p[:3] / p[3]
 
 
+# 8 corner offset directions reused by the tile-frustum cull.
+_TILE_CORNERS = np.array([
+    [0,0,0],[1,0,0],[0,1,0],[1,1,0],
+    [0,0,1],[1,0,1],[0,1,1],[1,1,1],
+], dtype=np.float32)
+
+
+def _compute_tile_offsets(sim, mvp4x4, cam_pos, win_w, win_h, view_scale, tile_distance):
+    """Build the list of tile offsets to instance. 2D: bounded by viewport.
+    3D: candidate cube of `tile_distance` tiles around the camera, then per-tile
+    frustum cull so we don't draw tiles behind the camera or off to the side."""
+    if sim.world_mode != 1:
+        return None
+    if not sim.mode3d:
+        vw, vh = win_w / view_scale, win_h / view_scale
+        r = max(1, int(math.ceil(max(vw / sim.world_w, vh / sim.world_h))) + 1)
+        ax = np.arange(-r, r + 1)
+        IX, IY = np.meshgrid(ax, ax, indexing='ij')
+        return np.stack([IX * sim.world_w, IY * sim.world_h,
+                         np.zeros_like(IX, dtype=np.float32)], axis=-1
+                        ).reshape(-1, 3).astype(np.float32)
+
+    sizes = np.array([sim.world_w, sim.world_h, sim.world_d], dtype=np.float64)
+    cam_tile = np.floor(np.asarray(cam_pos, dtype=np.float64) / sizes).astype(int)
+    d = max(0, int(tile_distance))
+    ax = np.arange(-d, d + 1)
+    IX, IY, IZ = np.meshgrid(ax + cam_tile[0], ax + cam_tile[1], ax + cam_tile[2],
+                             indexing='ij')
+    centers = np.stack([IX * sim.world_w, IY * sim.world_h, IZ * sim.world_d],
+                       axis=-1).reshape(-1, 3).astype(np.float32)
+    tile_size = np.array([sim.world_w, sim.world_h, sim.world_d], dtype=np.float32)
+    corners = centers[:, None, :] + _TILE_CORNERS[None, :, :] * tile_size
+    h4 = np.concatenate(
+        [corners, np.ones(corners.shape[:2] + (1,), dtype=np.float32)], axis=-1)
+    # mvp4x4 @ v_col == v_row @ mvp4x4.T  (clip-space in column-vector convention)
+    clip = h4 @ mvp4x4.astype(np.float32).T
+    x, y, z, w = clip[..., 0], clip[..., 1], clip[..., 2], clip[..., 3]
+    out = ((x >  w).all(axis=1) | (x < -w).all(axis=1) |
+           (y >  w).all(axis=1) | (y < -w).all(axis=1) |
+           (z >  w).all(axis=1) | (z < -w).all(axis=1))
+    return centers[~out]
+
+
 def main():
     if not glfw.init():
         raise RuntimeError("GLFW init failed")
@@ -222,17 +265,11 @@ def main():
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glEnable(GL_DEPTH_TEST) if sim.mode3d else glDisable(GL_DEPTH_TEST)
 
-        # compute tile_range: how many copies needed to fill viewport
-        if sim.world_mode == 1 and renderer.tile_wrap:
-            if sim.mode3d:
-                fog_dist = -math.log(0.02) / 0.00015  # matches fog density in shader
-                tile_range = int(math.ceil(fog_dist / min(sim.world_w, sim.world_h, sim.world_d)))
-            else:
-                vw = w / view_scale; vh = h / view_scale
-                tile_range = max(1, int(math.ceil(max(vw/sim.world_w, vh/sim.world_h))) + 1)
-        else:
-            tile_range = 0
-        renderer.draw(sim, w, h, view_offset=view_offset, view_scale=view_scale, mvp=mvp, tile_range=tile_range)
+        tile_offsets = (_compute_tile_offsets(sim, mvp4x4, cam_pos, w, h, view_scale,
+                                              renderer.tile_distance)
+                        if renderer.tile_wrap else None)
+        renderer.draw(sim, w, h, view_offset=view_offset, view_scale=view_scale,
+                      mvp=mvp, tile_offsets=tile_offsets)
         renderer.draw_grid(sim, w, h, view_offset=view_offset, view_scale=view_scale, mvp=mvp,
                            cam_pos=cam_pos if sim.mode3d else None)
 
