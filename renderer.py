@@ -180,7 +180,7 @@ class Renderer:
         self.show_grid = False
         self.tile_wrap = False
         self.tile_distance = 3   # tiles to include in each direction around camera
-        self.fog = False           # off by default — fog drastically dims the bloom
+        self.fog = True
         self.fog_density = 0.0006
 
         # Graphics settings (mirror original SandboxScience)
@@ -298,18 +298,22 @@ class Renderer:
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, self.ssbo_palette)
         glBindVertexArray(self.vao)
 
-        # Disable depth WRITE (keep test) so transparent halos don't occlude each
-        # other in 3D — otherwise the front particle's halo punches a hole in the
-        # depth buffer that blocks every halo behind it, killing the bloom effect.
+        # Halo pass: depth WRITE off (keep test) so transparent halos don't occlude
+        # each other — otherwise a front halo punches a hole that blocks every halo
+        # behind it. Core pass: depth WRITE on so opaque cores correctly occlude in
+        # buffer-order-independent depth order (without this, back particles paint
+        # over front particles whenever they appear later in the buffer).
         depth_was_on = glIsEnabled(GL_DEPTH_TEST)
-        if depth_was_on:
-            glDepthMask(GL_FALSE)
 
         # Pass 1: glow halo (premultiplied output, additive accumulation).
         if self.particle_glow:
+            if depth_was_on:
+                glDepthMask(GL_FALSE)
             glBlendFunc(GL_ONE, GL_ONE)
             glUniform1i(u["pass_mode"], 1)
             glDrawArraysInstanced(GL_POINTS, 0, sim.num_particles, instances)
+            if depth_was_on:
+                glDepthMask(GL_TRUE)
 
         # Pass 2: crisp particle core. Honors the user's blending choice.
         if self.additive_blending:
@@ -318,9 +322,6 @@ class Renderer:
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glUniform1i(u["pass_mode"], 0)
         glDrawArraysInstanced(GL_POINTS, 0, sim.num_particles, instances)
-
-        if depth_was_on:
-            glDepthMask(GL_TRUE)
 
         glBindVertexArray(0)
 
