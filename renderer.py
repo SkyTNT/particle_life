@@ -188,7 +188,7 @@ class Renderer:
         self.particle_opacity   = 0.85
         self.additive_blending  = True
         self.particle_glow      = True
-        self.glow_size          = 10.0   # quad size multiplier (1..32)
+        self.glow_size          = 6.0   # quad size multiplier (1..32)
         self.glow_intensity     = 0.066  # 0..0.5
         self.glow_steepness     = 3.0    # 0..12
 

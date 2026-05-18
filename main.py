@@ -134,7 +134,7 @@ def main():
         sim.world_w = sim.world_h = sim.world_d = 1600.0
         # Sit outside the cube on +z looking toward -z so the swarm is in front of us,
         # not surrounding us (which produces a wall of overlapping glow halos).
-        cam_pos   = np.array([800.0, 800.0, 2800.0], dtype=np.float32)
+        cam_pos   = np.array([800.0, 800.0, 800.0], dtype=np.float32)
         cam_yaw   = -math.pi / 2
         cam_pitch = 0.0
         sim.mode3d = True
@@ -203,18 +203,26 @@ def main():
 
         if sim.mode3d:
             # WASD movement (only need fwd/right, compute cheaply)
+            user_moved_cam = False
             if not io.want_capture_keyboard:
                 cy, sy = math.cos(cam_yaw), math.sin(cam_yaw)
                 cp     = math.cos(cam_pitch)
                 fwd    = np.array([cy*cp, math.sin(cam_pitch), sy*cp], dtype=np.float32)
                 right  = np.array([math.cos(cam_yaw - math.pi/2), 0, math.sin(cam_yaw - math.pi/2)], dtype=np.float32)
                 speed  = sim.world_w * dt * 0.8
-                if glfw.get_key(win, glfw.KEY_W)          == glfw.PRESS: cam_pos += fwd   * speed
-                if glfw.get_key(win, glfw.KEY_S)          == glfw.PRESS: cam_pos -= fwd   * speed
-                if glfw.get_key(win, glfw.KEY_A)          == glfw.PRESS: cam_pos -= right * speed
-                if glfw.get_key(win, glfw.KEY_D)          == glfw.PRESS: cam_pos += right * speed
-                if glfw.get_key(win, glfw.KEY_SPACE)      == glfw.PRESS: cam_pos[1] += speed
-                if glfw.get_key(win, glfw.KEY_LEFT_SHIFT) == glfw.PRESS: cam_pos[1] -= speed
+                for k, dv in (
+                    (glfw.KEY_W, fwd*speed), (glfw.KEY_S, -fwd*speed),
+                    (glfw.KEY_A, -right*speed), (glfw.KEY_D, right*speed),
+                ):
+                    if glfw.get_key(win, k) == glfw.PRESS:
+                        cam_pos += dv; user_moved_cam = True
+                if glfw.get_key(win, glfw.KEY_SPACE)      == glfw.PRESS:
+                    cam_pos[1] += speed; user_moved_cam = True
+                if glfw.get_key(win, glfw.KEY_LEFT_SHIFT) == glfw.PRESS:
+                    cam_pos[1] -= speed; user_moved_cam = True
+            if user_moved_cam and sim.drift_cam_enabled and sim.drift_cam_reset_on_pan:
+                drift_t[0] = 0.0
+                drift_seed[0] = random.random() * 1000.0
 
             # right-drag = rotate
             rotating = glfw.get_mouse_button(win, glfw.MOUSE_BUTTON_RIGHT) == glfw.PRESS and not io.want_capture_mouse
@@ -223,9 +231,13 @@ def main():
                     locked_mx, locked_my = mx, my
                     glfw.set_input_mode(win, glfw.CURSOR, glfw.CURSOR_DISABLED)
                 else:
-                    cam_yaw   -= (mx - mouse_last[0]) * 0.003
-                    cam_pitch  = max(-math.pi/2+0.01, min(math.pi/2-0.01,
-                                    cam_pitch - (my - mouse_last[1]) * 0.003))
+                    if mx != mouse_last[0] or my != mouse_last[1]:
+                        cam_yaw   -= (mx - mouse_last[0]) * 0.003
+                        cam_pitch  = max(-math.pi/2+0.01, min(math.pi/2-0.01,
+                                        cam_pitch - (my - mouse_last[1]) * 0.003))
+                        if sim.drift_cam_enabled and sim.drift_cam_reset_on_pan:
+                            drift_t[0] = 0.0
+                            drift_seed[0] = random.random() * 1000.0
                 mouse_last = (mx, my)
             else:
                 if mouse_last is not None:
@@ -305,6 +317,41 @@ def main():
                                    + ax * sim.world_w * sim.drift_cam_amplitude * 0.5
             target_view_offset[1] = cy / target_view_scale[0] - sim.world_h * 0.5 \
                                    + ay * sim.world_h * sim.drift_cam_amplitude * 0.5
+
+        # 3D drift cam: orbit the world center, slowly varying distance + pitch.
+        if sim.drift_cam_enabled and sim.mode3d:
+            drift_t[0] += dt * sim.drift_cam_speed
+            t = drift_t[0]
+            s = drift_seed[0]
+            wx_, wy_, wz_ = sim.world_w * 0.5, sim.world_h * 0.5, sim.world_d * 0.5
+            # Zoom range interpreted as a multiple of world size for orbit radius.
+            zmin, zmax = sim.drift_cam_zoom_range
+            zmid = (zmin + zmax) * 0.5
+            zhalf = (zmax - zmin) * 0.5
+            dist_factor = zmid + math.sin(t * 0.37 + s * 2.1) * zhalf
+            dist = max(sim.world_w, sim.world_d) * max(0.4, dist_factor)
+            # Orbital yaw + slow pitch wander, scaled by amplitude.
+            orbit_yaw   = t * 0.4 + s
+            orbit_pitch = math.sin(t * 0.23 + s * 1.3) * 0.45 * sim.drift_cam_amplitude
+            tx = wx_ + math.cos(orbit_yaw) * math.cos(orbit_pitch) * dist
+            ty = wy_ + math.sin(orbit_pitch) * dist
+            tz = wz_ + math.sin(orbit_yaw) * math.cos(orbit_pitch) * dist
+            kp = max(0.001, min(1.0, sim.pan_smoothing))
+            cam_pos[0] += (tx - cam_pos[0]) * kp
+            cam_pos[1] += (ty - cam_pos[1]) * kp
+            cam_pos[2] += (tz - cam_pos[2]) * kp
+            # Aim at world center.
+            fx, fy, fz = wx_ - cam_pos[0], wy_ - cam_pos[1], wz_ - cam_pos[2]
+            target_yaw   = math.atan2(fz, fx)
+            target_pitch = math.atan2(fy, math.sqrt(fx*fx + fz*fz))
+            yaw_diff = (target_yaw - cam_yaw + math.pi) % (2 * math.pi) - math.pi
+            cam_yaw   += yaw_diff * kp
+            cam_pitch += (target_pitch - cam_pitch) * kp
+            # Rebuild MVP with the updated camera so this frame's draw uses it.
+            view   = _look_at(cam_pos, cam_yaw, cam_pitch)
+            proj   = _perspective(60.0, w / h, 1.0, sim.world_w * 10)
+            mvp4x4 = proj @ view
+            mvp    = mvp4x4.T.flatten().astype(np.float32)
 
         # Apply zoom/pan smoothing (target → current). Clamp factor to [0,1].
         if not sim.mode3d:
