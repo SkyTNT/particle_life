@@ -1,6 +1,7 @@
 import glfw
 import imgui
 import math
+import random
 import numpy as np
 from imgui.integrations.glfw import GlfwRenderer
 from OpenGL.GL import *
@@ -111,8 +112,14 @@ def main():
     last_time = glfw.get_time()
     view_offset = [0.0, 0.0]
     view_scale  = 1.0
+    # Smoothed targets for camera (zoom/pan smoothing settings).
+    target_view_offset = [0.0, 0.0]
     drag_last = brush_last = None
     tool = [1]
+
+    # Drift cam state (auto pan + zoom).
+    drift_t  = [0.0]
+    drift_seed = [random.random() * 1000.0]
 
     cam_pos   = np.array([sim.world_w/2, sim.world_h/2, sim.world_w*1.5], dtype=np.float32)
     cam_yaw   = -math.pi / 2
@@ -125,7 +132,9 @@ def main():
     def enter_3d():
         nonlocal cam_pos, cam_yaw, cam_pitch
         sim.world_w = sim.world_h = sim.world_d = 1600.0
-        cam_pos   = np.array([800.0, 800.0, 800.0], dtype=np.float32)
+        # Sit outside the cube on +z looking toward -z so the swarm is in front of us,
+        # not surrounding us (which produces a wall of overlapping glow halos).
+        cam_pos   = np.array([800.0, 800.0, 2800.0], dtype=np.float32)
         cam_yaw   = -math.pi / 2
         cam_pitch = 0.0
         sim.mode3d = True
@@ -133,20 +142,27 @@ def main():
 
     sim.enter_3d = enter_3d
 
+    # List-backed so closures can mutate without nonlocal gymnastics.
+    target_view_scale = [1.0]
+
     def reset_view():
         nonlocal view_scale, cam_pos, cam_yaw, cam_pitch
         if sim.mode3d:
-            cam_pos  = np.array([sim.world_w/2, sim.world_h/2, sim.world_d/2], dtype=np.float32)
+            cam_pos  = np.array([sim.world_w/2, sim.world_h/2, sim.world_d * 1.75],
+                                dtype=np.float32)
             cam_yaw  = -math.pi / 2
             cam_pitch = 0.0
         else:
             view_offset[0] = view_offset[1] = 0.0
             view_scale = 1.0
+            target_view_offset[0] = target_view_offset[1] = 0.0
+            target_view_scale[0]  = 1.0
 
     sim.reset_view = reset_view
 
     def on_scroll(window, dx, dy):
-        nonlocal view_scale
+        # Forward to imgui so its windows/sliders can scroll, then bail if imgui owns the cursor.
+        impl.scroll_callback(window, dx, dy)
         if imgui.get_io().want_capture_mouse:
             return
         if sim.mode3d:
@@ -154,10 +170,15 @@ def main():
             return
         mx, my = glfw.get_cursor_pos(window)
         _, fh = glfw.get_framebuffer_size(window)
+        # Use the *current* view to compute the world point under the cursor, then
+        # set the smoothed *target* so that point stays fixed once the zoom catches up.
         wx, wy = screen_to_world(mx, my, fh, view_offset, view_scale)
-        view_scale *= 1.1 ** dy
-        view_offset[0] = mx / view_scale - wx
-        view_offset[1] = (fh - my) / view_scale - wy
+        target_view_scale[0] *= 1.1 ** dy
+        target_view_offset[0] = mx / target_view_scale[0] - wx
+        target_view_offset[1] = (fh - my) / target_view_scale[0] - wy
+        if sim.drift_cam_reset_on_pan and sim.drift_cam_enabled:
+            drift_t[0] = 0.0
+            drift_seed[0] = random.random() * 1000.0
 
     def on_key(window, key, scancode, action, mods):
         if action == glfw.PRESS and key == glfw.KEY_TAB:
@@ -231,6 +252,8 @@ def main():
                 if   tool[0] == 1: sim.apply_brush(bp[0], bp[1], bvx, bvy, bp[2])
                 elif tool[0] == 2: sim.paint_particles(bp[0], bp[1], bp[2])
                 elif tool[0] == 3: sim.apply_eraser(bp[0], bp[1], bp[2])
+                elif tool[0] == 4: sim.apply_attract(bp[0], bp[1], bp[2], attract=True)
+                elif tool[0] == 5: sim.apply_attract(bp[0], bp[1], bp[2], attract=False)
                 brush_last = (bp[0], bp[1])
             else:
                 brush_last = None
@@ -241,8 +264,15 @@ def main():
             if (glfw.get_mouse_button(win, glfw.MOUSE_BUTTON_MIDDLE) == glfw.PRESS or
                     glfw.get_mouse_button(win, glfw.MOUSE_BUTTON_RIGHT) == glfw.PRESS) and not io.want_capture_mouse:
                 if drag_last:
-                    view_offset[0] += (mx - drag_last[0]) / view_scale
-                    view_offset[1] -= (my - drag_last[1]) / view_scale
+                    dx_v = (mx - drag_last[0]) / view_scale
+                    dy_v = -(my - drag_last[1]) / view_scale
+                    view_offset[0]        += dx_v
+                    view_offset[1]        += dy_v
+                    target_view_offset[0] += dx_v
+                    target_view_offset[1] += dy_v
+                    if sim.drift_cam_enabled and sim.drift_cam_reset_on_pan:
+                        drift_t[0] = 0.0
+                        drift_seed[0] = random.random() * 1000.0
                 drag_last = (mx, my)
             else:
                 drag_last = None
@@ -253,9 +283,36 @@ def main():
                 if   tool[0] == 1: sim.apply_brush(wx, wy, bvx, bvy)
                 elif tool[0] == 2: sim.paint_particles(wx, wy)
                 elif tool[0] == 3: sim.apply_eraser(wx, wy)
+                elif tool[0] == 4: sim.apply_attract(wx, wy, 0.0, attract=True)
+                elif tool[0] == 5: sim.apply_attract(wx, wy, 0.0, attract=False)
                 brush_last = (wx, wy)
             else:
                 brush_last = None
+
+        # Drift cam: smoothly steer the *target* using lissajous-like motion.
+        if sim.drift_cam_enabled and not sim.mode3d:
+            drift_t[0] += dt * sim.drift_cam_speed
+            t = drift_t[0]
+            s = drift_seed[0]
+            ax = math.sin(t * 0.83 + s) * math.cos(t * 0.41 + s * 0.5)
+            ay = math.cos(t * 0.67 + s * 1.7) * math.sin(t * 0.29 + s * 0.3)
+            zmin, zmax = sim.drift_cam_zoom_range
+            zmid = (zmin + zmax) * 0.5
+            zhalf = (zmax - zmin) * 0.5
+            target_view_scale[0] = zmid + math.sin(t * 0.37 + s * 2.1) * zhalf
+            cx, cy = w * 0.5, h * 0.5
+            target_view_offset[0] = cx / target_view_scale[0] - sim.world_w * 0.5 \
+                                   + ax * sim.world_w * sim.drift_cam_amplitude * 0.5
+            target_view_offset[1] = cy / target_view_scale[0] - sim.world_h * 0.5 \
+                                   + ay * sim.world_h * sim.drift_cam_amplitude * 0.5
+
+        # Apply zoom/pan smoothing (target → current). Clamp factor to [0,1].
+        if not sim.mode3d:
+            kz = max(0.001, min(1.0, sim.zoom_smoothing))
+            kp = max(0.001, min(1.0, sim.pan_smoothing))
+            view_scale     += (target_view_scale[0]     - view_scale)     * kz
+            view_offset[0] += (target_view_offset[0]    - view_offset[0]) * kp
+            view_offset[1] += (target_view_offset[1]    - view_offset[1]) * kp
 
         sub_dt = dt * sim.sim_speed / sim.substeps
         sim.step_multi(sub_dt, sim.substeps)
@@ -273,12 +330,13 @@ def main():
         renderer.draw_grid(sim, w, h, view_offset=view_offset, view_scale=view_scale, mvp=mvp,
                            cam_pos=cam_pos if sim.mode3d else None)
 
-        if sim.mode3d:
-            renderer.draw_cursor(0, 0, sim.brush_radius, w, h,
-                                 mode3d=True, brush3d_pos=bp, mvp4x4=mvp4x4)
-        else:
-            renderer.draw_cursor(wx, wy, sim.brush_radius, w, h,
-                                 view_offset=view_offset, view_scale=view_scale)
+        if sim.show_brush_circle:
+            if sim.mode3d:
+                renderer.draw_cursor(0, 0, sim.brush_radius, w, h,
+                                     mode3d=True, brush3d_pos=bp, mvp4x4=mvp4x4)
+            else:
+                renderer.draw_cursor(wx, wy, sim.brush_radius, w, h,
+                                     view_offset=view_offset, view_scale=view_scale)
 
         imgui.new_frame()
         draw_ui(sim, tool, renderer)

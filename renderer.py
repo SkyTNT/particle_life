@@ -11,6 +11,8 @@ layout(std430, binding=8) buffer TileOffs  { vec4 tile_offsets[]; };
 uniform vec2 world_size; uniform vec2 view_offset; uniform float view_scale;
 uniform int mode3d, world_mode, tile_count;
 uniform float world_w, world_h, world_d;
+uniform float particle_size, glow_size;
+uniform int pass_mode;     // 0 = sharp circle (core), 1 = soft glow halo
 uniform mat4 mvp;
 out vec3 vColor;
 out float vDepth;
@@ -19,37 +21,63 @@ void main() {
     vec3 offset = (world_mode == 1 && tile_count > 0)
         ? tile_offsets[gl_InstanceID].xyz
         : vec3(0.0);
+    // Glow pass scales the quad by glow_size; circle pass renders at particle_size.
+    float size_mul = (pass_mode == 1) ? max(1.0, glow_size) : 1.0;
     if (mode3d == 1) {
         gl_Position = mvp * vec4(pt.x+offset.x, pt.y+offset.y, pt.z+offset.z, 1.0);
-        // cull instances behind camera or far outside frustum
         if (gl_Position.w <= 0.0 || gl_Position.w > 200000.0) {
-            gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // outside NDC, discarded
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
             gl_PointSize = 0.0;
             return;
         }
-        gl_PointSize = max(1.0, 8000.0 / gl_Position.w);
+        // Cap effective depth so near-camera particles don't blow up to huge halos
+        // (additive blending of thousands of giant blobs washes the whole frame white).
+        float depth = max(gl_Position.w, 80.0);
+        float px = 2000.0 * particle_size / depth * size_mul;
+        gl_PointSize = clamp(px, 1.0, 64.0);
         vDepth = gl_Position.w;
     } else {
         vec2 sp = (vec2(pt.x+offset.x, pt.y+offset.y) + view_offset) * view_scale;
         gl_Position = vec4(sp/world_size*2.0-1.0, 0.0, 1.0);
-        gl_PointSize = max(1.0, 4.0 * view_scale);
+        gl_PointSize = max(1.0, particle_size * view_scale * size_mul);
         vDepth = 0.0;
     }
     vColor = palette[pt.color].rgb;
 }
 """
 
+# Matches reference impl (particle_render_glow.wgsl):
+#   glow:   falloff = saturate(1 - r^2); alpha = pow(falloff, steepness) * intensity
+#           output color premultiplied so blend (ONE,ONE) gives bright additive bloom.
+#   circle: antialiased disk via fwidth(r^2); color gamma-corrected to linear for blend.
 FRAG = """
 #version 430 core
 in vec3 vColor; in float vDepth; out vec4 fragColor;
 uniform int fog_enabled;
 uniform float fog_density;
+uniform float particle_opacity;
+uniform int pass_mode;
+uniform float glow_intensity, glow_steepness;
 void main() {
     vec2 c = gl_PointCoord*2.0-1.0;
-    if (dot(c,c)>1.0) discard;
+    float r2 = dot(c, c);
+    if (r2 > 1.0) discard;
     float brightness = (vDepth > 0.0 && fog_enabled == 1) ? exp(-vDepth * fog_density) : 1.0;
-    if (brightness < 0.02) discard;
-    fragColor = vec4(vColor * brightness, 1.0);
+    if (pass_mode == 1) {
+        float falloff = clamp(1.0 - r2, 0.0, 1.0);
+        float alpha = pow(falloff, max(0.001, glow_steepness)) * glow_intensity * brightness;
+        if (alpha < 0.0001) discard;
+        // Premultiplied — pair with glBlendFunc(GL_ONE, GL_ONE) for additive bloom.
+        fragColor = vec4(vColor * alpha, alpha);
+    } else {
+        float edge_width = fwidth(r2);
+        float disk = 1.0 - smoothstep(max(0.0, 1.0 - edge_width), 1.0, r2);
+        float alpha = disk * particle_opacity * brightness;
+        if (alpha < 0.0005) discard;
+        // Gamma-correct color to linear space for nicer blending (matches reference).
+        vec3 linear_color = pow(vColor, vec3(2.2));
+        fragColor = vec4(linear_color, alpha);
+    }
 }
 """
 
@@ -152,8 +180,17 @@ class Renderer:
         self.show_grid = False
         self.tile_wrap = False
         self.tile_distance = 3   # tiles to include in each direction around camera
-        self.fog = True
+        self.fog = False           # off by default — fog drastically dims the bloom
         self.fog_density = 0.0006
+
+        # Graphics settings (mirror original SandboxScience)
+        self.particle_size      = 2.0
+        self.particle_opacity   = 0.85
+        self.additive_blending  = True
+        self.particle_glow      = True
+        self.glow_size          = 10.0   # quad size multiplier (1..32)
+        self.glow_intensity     = 0.066  # 0..0.5
+        self.glow_steepness     = 3.0    # 0..12
 
     def init_gl(self):
         self.prog = _compile_prog(VERT, FRAG)
@@ -179,7 +216,12 @@ class Renderer:
 
         def _locs(prog, names):
             return {n: glGetUniformLocation(prog, n) for n in names}
-        self._uloc_draw = _locs(self.prog, ["world_size","view_offset","view_scale","mode3d","mvp","world_mode","world_w","world_h","world_d","tile_count","fog_enabled","fog_density"])
+        self._uloc_draw = _locs(self.prog, [
+            "world_size","view_offset","view_scale","mode3d","mvp",
+            "world_mode","world_w","world_h","world_d","tile_count",
+            "fog_enabled","fog_density",
+            "particle_size","particle_opacity","pass_mode",
+            "glow_size","glow_intensity","glow_steepness"])
         self._uloc_grid = _locs(self.grid_prog, ["mode3d","step","view_offset","view_scale","win_size","inv_mvp","cam_pos","world_h"])
 
         # pre-compute cursor angles
@@ -229,6 +271,11 @@ class Renderer:
         glUniform1f(u["world_d"], sim.world_d)
         glUniform1i(u["fog_enabled"], 1 if (sim.mode3d and self.fog) else 0)
         glUniform1f(u["fog_density"], self.fog_density)
+        glUniform1f(u["particle_size"],    self.particle_size)
+        glUniform1f(u["particle_opacity"], self.particle_opacity)
+        glUniform1f(u["glow_size"],        self.glow_size)
+        glUniform1f(u["glow_intensity"],   self.glow_intensity)
+        glUniform1f(u["glow_steepness"],   self.glow_steepness)
         if sim.mode3d and mvp is not None:
             glUniformMatrix4fv(u["mvp"], 1, GL_FALSE, mvp)
 
@@ -250,7 +297,31 @@ class Renderer:
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, sim.get_particle_ssbo())
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, self.ssbo_palette)
         glBindVertexArray(self.vao)
+
+        # Disable depth WRITE (keep test) so transparent halos don't occlude each
+        # other in 3D — otherwise the front particle's halo punches a hole in the
+        # depth buffer that blocks every halo behind it, killing the bloom effect.
+        depth_was_on = glIsEnabled(GL_DEPTH_TEST)
+        if depth_was_on:
+            glDepthMask(GL_FALSE)
+
+        # Pass 1: glow halo (premultiplied output, additive accumulation).
+        if self.particle_glow:
+            glBlendFunc(GL_ONE, GL_ONE)
+            glUniform1i(u["pass_mode"], 1)
+            glDrawArraysInstanced(GL_POINTS, 0, sim.num_particles, instances)
+
+        # Pass 2: crisp particle core. Honors the user's blending choice.
+        if self.additive_blending:
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE)
+        else:
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glUniform1i(u["pass_mode"], 0)
         glDrawArraysInstanced(GL_POINTS, 0, sim.num_particles, instances)
+
+        if depth_was_on:
+            glDepthMask(GL_TRUE)
+
         glBindVertexArray(0)
 
     def draw_cursor(self, wx, wy, radius, win_w, win_h, view_offset=(0.0,0.0), view_scale=1.0,

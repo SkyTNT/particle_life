@@ -97,7 +97,7 @@ layout(std430, binding=0) buffer SrcP   { Particle src[]; };
 layout(std430, binding=5) buffer DstP   { Particle dst[]; };
 layout(std430, binding=1) buffer Rules  { Rule rules[]; };
 layout(std430, binding=7) buffer BinOff { uint binOffset[]; };
-uniform int num_particles, num_colors, world_mode, mode3d;
+uniform int num_particles, num_colors, world_mode, mode3d, scan_range;
 uniform int gridW, gridH, gridD;
 uniform float invCellX, invCellY, invCellZ;
 uniform float world_w, world_h, world_d;
@@ -118,19 +118,16 @@ void main() {
     int by = wrapBin(int(floor(py * invCellY)), gridH);
     int bz = (mode3d == 1) ? wrapBin(int(floor(pz * invCellZ)), gridD) : 0;
 
-    int dzMin = (mode3d == 1) ? -1 : 0;
-    int dzMax = (mode3d == 1) ?  1 : 0;
+    int dzMin = (mode3d == 1) ? -scan_range : 0;
+    int dzMax = (mode3d == 1) ?  scan_range : 0;
 
     float ax = 0.0, ay = 0.0, az = 0.0;
     for (int dz = dzMin; dz <= dzMax; ++dz) {
-        int rbz = bz + dz;
-        if (rbz < 0) rbz += gridD; else if (rbz >= gridD) rbz -= gridD;
-        for (int dy = -1; dy <= 1; ++dy) {
-            int rby = by + dy;
-            if (rby < 0) rby += gridH; else if (rby >= gridH) rby -= gridH;
-            for (int dx = -1; dx <= 1; ++dx) {
-                int rbx = bx + dx;
-                if (rbx < 0) rbx += gridW; else if (rbx >= gridW) rbx -= gridW;
+        int rbz = wrapBin(bz + dz, gridD);
+        for (int dy = -scan_range; dy <= scan_range; ++dy) {
+            int rby = wrapBin(by + dy, gridH);
+            for (int dx = -scan_range; dx <= scan_range; ++dx) {
+                int rbx = wrapBin(bx + dx, gridW);
                 int binIdx = (rbz * gridH + rby) * gridW + rbx;
                 uint start = binOffset[binIdx];
                 uint end   = binOffset[binIdx + 1];
@@ -167,6 +164,68 @@ void main() {
                 }
             }
         }
+    }
+    float aLen = length(vec3(ax, ay, az));
+    if (max_accel > 0.0 && aLen > max_accel) {
+        float s = max_accel / aLen; ax *= s; ay *= s; az *= s;
+    }
+    pt.vx = pt.vx * (1.0 - friction_factor) + ax * force_factor;
+    pt.vy = pt.vy * (1.0 - friction_factor) + ay * force_factor;
+    if (mode3d == 1) pt.vz = pt.vz * (1.0 - friction_factor) + az * force_factor;
+    dst[i] = pt;
+}
+"""
+
+# Brute-force variant used when the spatial-hash path is disabled (debug toggle).
+# O(N^2) - only viable for small N, but matches the reference implementation's
+# "Brute Force" neighbor-search mode.
+_FORCE_BRUTE_SRC = _COMMON_HEAD + """
+layout(local_size_x = 64) in;
+layout(std430, binding=0) buffer SrcP  { Particle src[]; };
+layout(std430, binding=5) buffer DstP  { Particle dst[]; };
+layout(std430, binding=1) buffer Rules { Rule rules[]; };
+uniform int num_particles, num_colors, world_mode, mode3d;
+uniform float world_w, world_h, world_d;
+uniform float force_factor, friction_factor, repel, max_accel;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(num_particles)) return;
+    Particle pt = src[i];
+    float px = pt.x, py = pt.y, pz = pt.z;
+    int   myOff = pt.color * num_colors;
+    bool  wrap  = (world_mode == 1);
+    float halfW = world_w * 0.5, halfH = world_h * 0.5, halfD = world_d * 0.5;
+    float ax = 0.0, ay = 0.0, az = 0.0;
+    for (int j = 0; j < num_particles; ++j) {
+        if (j == int(i)) continue;
+        Particle q = src[j];
+        float rx = q.x - px;
+        float ry = q.y - py;
+        float rz = (mode3d == 1) ? (q.z - pz) : 0.0;
+        if (wrap) {
+            if (rx >  halfW) rx -= world_w; else if (rx < -halfW) rx += world_w;
+            if (ry >  halfH) ry -= world_h; else if (ry < -halfH) ry += world_h;
+            if (mode3d == 1) {
+                if (rz >  halfD) rz -= world_d; else if (rz < -halfD) rz += world_d;
+            }
+        }
+        float distSq = rx*rx + ry*ry + rz*rz;
+        Rule r = rules[myOff + q.color];
+        if (distSq >= r.max_r * r.max_r || distSq < 1e-12) continue;
+        float dist = sqrt(distSq);
+        float safe = max(dist, r.min_r * 0.1);
+        float f;
+        if (safe < r.min_r) {
+            f = (repel / r.min_r) * safe - repel;
+        } else {
+            float mid   = (r.min_r + r.max_r) * 0.5;
+            float slope = r.force / (mid - r.min_r);
+            f = -(slope * abs(safe - mid)) + r.force;
+        }
+        float invD = 1.0 / safe;
+        ax += rx * invD * f;
+        ay += ry * invD * f;
+        az += rz * invD * f;
     }
     float aLen = length(vec3(ax, ay, az));
     if (max_accel > 0.0 && aLen > max_accel) {
@@ -240,6 +299,31 @@ void main() {
 }
 """
 
+# Attract/repel brush: radial pull (sign=+1) or push (sign=-1) toward the cursor.
+_ATTRACT_SRC = _COMMON_HEAD + """
+layout(local_size_x = 64) in;
+layout(std430, binding=0) buffer Particles { Particle p[]; };
+uniform int num_particles, wrap, mode3d;
+uniform float brush_x, brush_y, brush_z, brush_r, brush_force, sign, world_w, world_h;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(num_particles)) return;
+    float dx = p[i].x - brush_x, dy = p[i].y - brush_y, dz = (mode3d==1) ? (p[i].z - brush_z) : 0.0;
+    if (wrap == 1) {
+        if (dx >  world_w*0.5) dx -= world_w; if (dx < -world_w*0.5) dx += world_w;
+        if (dy >  world_h*0.5) dy -= world_h; if (dy < -world_h*0.5) dy += world_h;
+    }
+    float distSq = dx*dx + dy*dy + dz*dz;
+    if (distSq >= brush_r*brush_r || distSq <= 0.0) return;
+    float dist = sqrt(distSq);
+    float t = 1.0 - smoothstep(0.0, 1.0, dist/brush_r);
+    // sign = -1 attracts (force points from particle toward cursor), +1 repels.
+    p[i].vx += sign * dx/dist * brush_force * t * 500.0;
+    p[i].vy += sign * dy/dist * brush_force * t * 500.0;
+    if (mode3d == 1) p[i].vz += sign * dz/dist * brush_force * t * 500.0;
+}
+"""
+
 _ERASE_SRC = _COMMON_HEAD + """
 layout(local_size_x = 64) in;
 layout(std430, binding=0) buffer Particles  { Particle p[]; };
@@ -299,13 +383,33 @@ class Simulation:
         self.substeps        = 1
         self.max_speed       = 0.0
         self.max_accel       = 0.0
+
+        # Brush / tool params
         self.brush_radius    = 80.0
-        self.brush_force     = 0.1
+        self.brush_force     = 0.1            # legacy "push" tool force
+        self.brush_intensity = 16             # particles per click for paint
+        self.attract_force   = 0.5            # attractor tool strength
+        self.repulse_force   = 0.35           # repeller tool strength
+        self.brush_directional_force = 0.4    # how much mouse motion adds velocity
+        self.show_brush_circle = True
         self.brush_colors    = set()
 
         self.rand_force_range = [-1.0, 1.0]
         self.rand_min_r_range = [12.0, 24.0]
         self.rand_max_r_range = [32.0, 64.0]
+
+        # Debug / neighbor-search controls
+        self.cell_subdivisions = 1            # cells per max_r (1 = original behavior)
+        self.use_spatial_hash  = True
+
+        # Camera smoothing + drift cam (auto pan/zoom).
+        self.zoom_smoothing       = 0.15      # 0..1, 1 = instant
+        self.pan_smoothing        = 0.17
+        self.drift_cam_enabled    = False
+        self.drift_cam_reset_on_pan = False
+        self.drift_cam_speed      = 0.1
+        self.drift_cam_amplitude  = 0.90
+        self.drift_cam_zoom_range = [0.4, 3.0]
 
         self.mode3d = False
         self._dtype = np.dtype([
@@ -330,12 +434,16 @@ class Simulation:
         # programs
         self._prog_bin_clear = self._prog_bin_fill = self._prog_prefix = None
         self._prog_sort = self._prog_force = self._prog_advance = None
-        self._prog_brush = self._prog_erase = None
+        self._prog_force_brute = None
+        self._prog_brush = self._prog_erase = self._prog_attract = None
 
     _DEFAULTS = dict(
         force_factor=1.0, friction_factor=0.3, repel=1.0,
         sim_speed=1.0, substeps=1, max_speed=0.0, max_accel=0.0,
-        brush_radius=80.0, brush_force=0.1, brush_color=0,
+        brush_radius=80.0, brush_force=0.1,
+        brush_intensity=16, attract_force=0.5, repulse_force=0.35,
+        brush_directional_force=0.4, show_brush_circle=True,
+        cell_subdivisions=1, use_spatial_hash=True,
     )
 
     def reset_params(self):
@@ -346,14 +454,16 @@ class Simulation:
     # GL setup
     # -------------------------------------------------------------------------
     def init_gl(self):
-        self._prog_bin_clear = _compile(_BIN_CLEAR_SRC)
-        self._prog_bin_fill  = _compile(_BIN_FILL_SRC)
-        self._prog_prefix    = _compile(_PREFIX_SUM_SRC)
-        self._prog_sort      = _compile(_SORT_SRC)
-        self._prog_force     = _compile(_FORCE_SRC)
-        self._prog_advance   = _compile(_ADVANCE_SRC)
-        self._prog_brush     = _compile(_BRUSH_SRC)
-        self._prog_erase     = _compile(_ERASE_SRC)
+        self._prog_bin_clear   = _compile(_BIN_CLEAR_SRC)
+        self._prog_bin_fill    = _compile(_BIN_FILL_SRC)
+        self._prog_prefix      = _compile(_PREFIX_SUM_SRC)
+        self._prog_sort        = _compile(_SORT_SRC)
+        self._prog_force       = _compile(_FORCE_SRC)
+        self._prog_force_brute = _compile(_FORCE_BRUTE_SRC)
+        self._prog_advance     = _compile(_ADVANCE_SRC)
+        self._prog_brush       = _compile(_BRUSH_SRC)
+        self._prog_attract     = _compile(_ATTRACT_SRC)
+        self._prog_erase       = _compile(_ERASE_SRC)
 
         bufs = glGenBuffers(7)
         (self._buf_a, self._buf_b, self._ssbo_rules,
@@ -369,8 +479,13 @@ class Simulation:
             "num_particles","mode3d","gridW","gridH","gridD",
             "invCellX","invCellY","invCellZ"])
         self._uloc_force     = _locs(self._prog_force, [
-            "num_particles","num_colors","world_mode","mode3d","gridW","gridH","gridD",
+            "num_particles","num_colors","world_mode","mode3d","scan_range",
+            "gridW","gridH","gridD",
             "invCellX","invCellY","invCellZ","world_w","world_h","world_d",
+            "force_factor","friction_factor","repel","max_accel"])
+        self._uloc_force_brute = _locs(self._prog_force_brute, [
+            "num_particles","num_colors","world_mode","mode3d",
+            "world_w","world_h","world_d",
             "force_factor","friction_factor","repel","max_accel"])
         self._uloc_advance   = _locs(self._prog_advance, [
             "num_particles","world_mode","mode3d","world_w","world_h","world_d",
@@ -378,6 +493,9 @@ class Simulation:
         self._uloc_brush = _locs(self._prog_brush, [
             "num_particles","wrap","mode3d","brush_x","brush_y","brush_z",
             "brush_r","world_w","world_h","brush_vx","brush_vy","brush_force"])
+        self._uloc_attract = _locs(self._prog_attract, [
+            "num_particles","wrap","mode3d","brush_x","brush_y","brush_z",
+            "brush_r","world_w","world_h","brush_force","sign"])
         self._uloc_erase = _locs(self._prog_erase, [
             "num_particles","wrap","mode3d","brush_x","brush_y","brush_z",
             "brush_r","world_w","world_h","num_erase_types"])
@@ -458,9 +576,10 @@ class Simulation:
         # Per-axis cells exactly divide the world so wrap boundaries align with
         # bin boundaries — otherwise the 3-wide neighbor scan misses interactions
         # right at the wrap edge and the simulation feels like there's a wall.
-        # Cell size per axis >= max(max_r) so 3-wide neighbor scan covers all
-        # possible interactions. Floor max_r at 8 to keep the grid sane.
-        cs_min = float(max(self.max_r_matrix.max(), 8.0))
+        # Cell size per axis >= max(max_r) / cell_subdivisions so a (2*subdiv+1)-wide
+        # neighbor scan still covers all interactions. Floor at 8 to keep the grid sane.
+        sub = max(1, int(self.cell_subdivisions))
+        cs_min = float(max(self.max_r_matrix.max() / sub, 8.0))
         gw = max(1, int(self.world_w / cs_min))   # floor
         gh = max(1, int(self.world_h / cs_min))
         gd = max(1, int(self.world_d / cs_min)) if self.mode3d else 1
@@ -563,6 +682,7 @@ class Simulation:
         glUniform1i(u["num_particles"],   self.num_particles)
         glUniform1i(u["num_colors"],      self.num_colors)
         glUniform1i(u["world_mode"],      self.world_mode)
+        glUniform1i(u["scan_range"],      max(1, int(self.cell_subdivisions)))
         self._set_bin_uniforms(u)
         glUniform1f(u["world_w"],         self.world_w)
         glUniform1f(u["world_h"],         self.world_h)
@@ -575,6 +695,26 @@ class Simulation:
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, dst_buf)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, self._ssbo_rules)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, self._ssbo_bin_off)
+        glDispatchCompute((self.num_particles + 63) // 64, 1, 1)
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+    def _force_brute(self, src_buf, dst_buf):
+        u = self._uloc_force_brute
+        glUseProgram(self._prog_force_brute)
+        glUniform1i(u["num_particles"],   self.num_particles)
+        glUniform1i(u["num_colors"],      self.num_colors)
+        glUniform1i(u["world_mode"],      self.world_mode)
+        glUniform1i(u["mode3d"],          1 if self.mode3d else 0)
+        glUniform1f(u["world_w"],         self.world_w)
+        glUniform1f(u["world_h"],         self.world_h)
+        glUniform1f(u["world_d"],         self.world_d)
+        glUniform1f(u["force_factor"],    self.force_factor)
+        glUniform1f(u["friction_factor"], self.friction_factor)
+        glUniform1f(u["repel"],           self.repel)
+        glUniform1f(u["max_accel"],       self.max_accel)
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, src_buf)
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, dst_buf)
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, self._ssbo_rules)
         glDispatchCompute((self.num_particles + 63) // 64, 1, 1)
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
 
@@ -599,20 +739,26 @@ class Simulation:
     def step_multi(self, dt_scale, substeps):
         if self.num_particles <= 0:
             return
-        self._ensure_bins()
+        if self.use_spatial_hash:
+            self._ensure_bins()
         for _ in range(substeps):
-            src = self._current_buf()
-            dst = self._other_buf()
-            self._bin_clear()
-            self._bin_fill(src)
-            self._prefix_sum()
-            self._bin_clear()
-            self._sort(src, dst)
-            self._a_current = not self._a_current  # sorted result is now current
+            if self.use_spatial_hash:
+                src = self._current_buf()
+                dst = self._other_buf()
+                self._bin_clear()
+                self._bin_fill(src)
+                self._prefix_sum()
+                self._bin_clear()
+                self._sort(src, dst)
+                self._a_current = not self._a_current  # sorted result is now current
 
-            src = self._current_buf()
-            dst = self._other_buf()
-            self._force(src, dst)
+                src = self._current_buf()
+                dst = self._other_buf()
+                self._force(src, dst)
+            else:
+                src = self._current_buf()
+                dst = self._other_buf()
+                self._force_brute(src, dst)
             self._a_current = not self._a_current  # force-updated now current
 
             self._advance(self._current_buf(), dt_scale)
@@ -639,7 +785,35 @@ class Simulation:
         if self.num_particles <= 0:
             return
         glUseProgram(self._prog_brush)
-        self._set_brush_uniforms(self._uloc_brush, wx, wy, vx, vy, wz)
+        # Scale directional contribution by brush_directional_force (0..1+).
+        self._set_brush_uniforms(self._uloc_brush, wx, wy,
+                                 vx * self.brush_directional_force,
+                                 vy * self.brush_directional_force, wz)
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, self._current_buf())
+        glDispatchCompute((self.num_particles + 63) // 64, 1, 1)
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+
+    def apply_attract(self, wx, wy, wz=0.0, attract=True):
+        """Radial pull (attract=True) or push (attract=False) toward cursor."""
+        if self.num_particles <= 0:
+            return
+        glUseProgram(self._prog_attract)
+        u = self._uloc_attract
+        glUniform1i(u["num_particles"], self.num_particles)
+        glUniform1i(u["wrap"],          1 if self.world_mode == 1 else 0)
+        glUniform1i(u["mode3d"],        1 if self.mode3d else 0)
+        glUniform1f(u["brush_x"],       wx)
+        glUniform1f(u["brush_y"],       wy)
+        glUniform1f(u["brush_z"],       wz)
+        glUniform1f(u["brush_r"],       self.brush_radius)
+        glUniform1f(u["world_w"],       self.world_w)
+        glUniform1f(u["world_h"],       self.world_h)
+        if attract:
+            glUniform1f(u["brush_force"], self.attract_force)
+            glUniform1f(u["sign"],        -1.0)
+        else:
+            glUniform1f(u["brush_force"], self.repulse_force)
+            glUniform1f(u["sign"],         1.0)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, self._current_buf())
         glDispatchCompute((self.num_particles + 63) // 64, 1, 1)
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
@@ -684,7 +858,9 @@ class Simulation:
             glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, kept.nbytes, kept)
         self._a_current = True
 
-    def paint_particles(self, wx, wy, wz=0.0, count=10):
+    def paint_particles(self, wx, wy, wz=0.0, count=None):
+        if count is None:
+            count = max(1, int(self.brush_intensity))
         angles = np.random.rand(count) * 2 * np.pi
         radii  = np.random.rand(count) * self.brush_radius
         data = np.zeros(count, dtype=self._dtype)
