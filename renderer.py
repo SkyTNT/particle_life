@@ -70,13 +70,17 @@ void main() {
         float alpha = pow(falloff, max(0.001, glow_steepness)) * glow_intensity * brightness;
         if (alpha < 0.0001) discard;
         // Premultiplied — pair with glBlendFunc(GL_ONE, GL_ONE) for additive bloom.
+        // Halo stays in sRGB-ish space (no linearize) so the tone-map step
+        // approximately matches old non-HDR brightness in the dim/halo range.
         fragColor = vec4(vColor * alpha, alpha);
     } else {
         float edge_width = fwidth(r2);
         float disk = 1.0 - smoothstep(max(0.0, 1.0 - edge_width), 1.0, r2);
         float alpha = disk * particle_opacity * brightness;
         if (alpha < 0.0005) discard;
-        // Gamma-correct color to linear space for nicer blending (matches reference).
+        // Gamma-correct core color to linear for nicer overlap blending (matches
+        // the original reference impl). Tone-map below treats both halo and core
+        // outputs as the final-ish color, only compressing the upper end.
         vec3 linear_color = pow(vColor, vec3(2.2));
         fragColor = vec4(linear_color, alpha);
     }
@@ -146,6 +150,35 @@ out vec4 fragColor;
 void main() { fragColor = vec4(1.0, 1.0, 1.0, 0.8); }
 """
 
+# HDR tone-map pass. Particles render into a float16 framebuffer (no clamp at
+# accumulation), then this shader compresses unbounded brightness back into
+# [0,1] with `1 - exp(-x * exposure)` so dense regions roll off instead of
+# clipping to white. Also gammas the result back to sRGB since the scene
+# accumulated in linear space.
+TONE_VERT = """
+#version 430 core
+out vec2 uv;
+void main() {
+    vec2 pos = vec2((gl_VertexID & 1) * 2 - 1, (gl_VertexID >> 1) * 2 - 1);
+    uv = pos * 0.5 + 0.5;
+    gl_Position = vec4(pos, 0.0, 1.0);
+}
+"""
+TONE_FRAG = """
+#version 430 core
+in vec2 uv;
+out vec4 fragColor;
+uniform sampler2D hdr_tex;
+uniform float exposure;
+void main() {
+    vec3 hdr = texture(hdr_tex, uv).rgb;
+    // 1 - exp(-x * e): identity-like for small x (1-exp(-x) ≈ x), smoothly
+    // rolls off as x grows. No final gamma here — adding pow(_, 1/2.2) would
+    // strongly amplify dim halo tails and visually inflate glow.
+    fragColor = vec4(1.0 - exp(-max(hdr, 0.0) * exposure), 1.0);
+}
+"""
+
 
 def _compile_prog(vert_src, frag_src):
     def _s(src, kind):
@@ -194,6 +227,16 @@ class Renderer:
         self.glow_intensity     = 0.066  # 0..0.5
         self.glow_steepness     = 3.0    # 0..12
 
+        # HDR + tone mapping. Without this, additive accumulation clips RGB to
+        # 1.0 (white) in dense regions; with this, the float HDR buffer never
+        # clips and the tone-map curve rolls off bright spots smoothly.
+        self.tone_mapping = False
+        self.exposure     = 1.0
+        self.clear_color  = (0.05, 0.05, 0.08, 1.0)
+        self._hdr_fbo = self._hdr_color = self._hdr_depth = None
+        self._hdr_w = self._hdr_h = 0
+        self.tone_prog = self.tone_vao = None
+
     def init_gl(self):
         self.prog = _compile_prog(VERT, FRAG)
         self.cursor_prog = _compile_prog(CURSOR_VERT, CURSOR_FRAG)
@@ -216,6 +259,9 @@ class Renderer:
         self.grid_prog = _compile_prog(GRID_VERT, GRID_FRAG)
         self.grid_vao = glGenVertexArrays(1)
 
+        self.tone_prog = _compile_prog(TONE_VERT, TONE_FRAG)
+        self.tone_vao = glGenVertexArrays(1)
+
         def _locs(prog, names):
             return {n: glGetUniformLocation(prog, n) for n in names}
         self._uloc_draw = _locs(self.prog, [
@@ -225,6 +271,7 @@ class Renderer:
             "particle_size","particle_opacity","pass_mode",
             "glow_size","glow_intensity","glow_steepness"])
         self._uloc_grid = _locs(self.grid_prog, ["mode3d","step","view_offset","view_scale","win_size","inv_mvp","cam_pos","world_h"])
+        self._uloc_tone = _locs(self.tone_prog, ["hdr_tex","exposure"])
 
         # pre-compute cursor angles
         _a = np.linspace(0, 2*math.pi, 64, endpoint=False)
@@ -236,6 +283,66 @@ class Renderer:
     def _upload_palette(self):
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, self.ssbo_palette)
         glBufferData(GL_SHADER_STORAGE_BUFFER, self.palette.nbytes, self.palette, GL_DYNAMIC_DRAW)
+
+    def _ensure_hdr_fbo(self, w, h):
+        if self._hdr_fbo is not None and self._hdr_w == w and self._hdr_h == h:
+            return
+        if self._hdr_fbo is not None:
+            glDeleteFramebuffers(1, np.array([self._hdr_fbo], dtype=np.uint32))
+            glDeleteTextures(np.array([self._hdr_color, self._hdr_depth], dtype=np.uint32))
+        self._hdr_fbo   = glGenFramebuffers(1)
+        self._hdr_color = glGenTextures(1)
+        self._hdr_depth = glGenTextures(1)
+        self._hdr_w, self._hdr_h = w, h
+
+        glBindTexture(GL_TEXTURE_2D, self._hdr_color)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, None)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+
+        glBindTexture(GL_TEXTURE_2D, self._hdr_depth)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0,
+                     GL_DEPTH_COMPONENT, GL_FLOAT, None)
+
+        glBindFramebuffer(GL_FRAMEBUFFER, self._hdr_fbo)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, self._hdr_color, 0)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                               GL_TEXTURE_2D, self._hdr_depth, 0)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+    def begin_frame(self, w, h):
+        """Bind the HDR (or default) framebuffer for scene rendering, clear it,
+        and set the viewport. Caller still toggles depth test based on mode3d."""
+        if self.tone_mapping:
+            self._ensure_hdr_fbo(w, h)
+            glBindFramebuffer(GL_FRAMEBUFFER, self._hdr_fbo)
+        else:
+            glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glViewport(0, 0, w, h)
+        glClearColor(*self.clear_color)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+    def end_frame(self, w, h):
+        """If HDR was used, tone-map it to the default framebuffer. Otherwise
+        no-op (scene was already rendered to default)."""
+        if not self.tone_mapping or self._hdr_fbo is None:
+            return
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glViewport(0, 0, w, h)
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_BLEND)
+        glUseProgram(self.tone_prog)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self._hdr_color)
+        glUniform1i(self._uloc_tone["hdr_tex"], 0)
+        glUniform1f(self._uloc_tone["exposure"], float(self.exposure))
+        glBindVertexArray(self.tone_vao)
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
+        glBindVertexArray(0)
+        glEnable(GL_BLEND)
 
     def draw_grid(self, sim, win_w, win_h, view_offset=(0.0,0.0), view_scale=1.0, mvp=None,
                   cam_pos=None, **_):

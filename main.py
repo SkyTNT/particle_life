@@ -132,8 +132,6 @@ def main():
     def enter_3d():
         nonlocal cam_pos, cam_yaw, cam_pitch
         sim.world_w = sim.world_h = sim.world_d = 1600.0
-        # Sit outside the cube on +z looking toward -z so the swarm is in front of us,
-        # not surrounding us (which produces a wall of overlapping glow halos).
         cam_pos   = np.array([800.0, 800.0, 800.0], dtype=np.float32)
         cam_yaw   = -math.pi / 2
         cam_pitch = 0.0
@@ -364,9 +362,7 @@ def main():
         sub_dt = dt * sim.sim_speed / sim.substeps
         sim.step_multi(sub_dt, sim.substeps)
 
-        glViewport(0, 0, w, h)
-        glClearColor(0.05, 0.05, 0.08, 1.0)
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        renderer.begin_frame(w, h)
         glEnable(GL_DEPTH_TEST) if sim.mode3d else glDisable(GL_DEPTH_TEST)
 
         tile_offsets = (_compute_tile_offsets(sim, mvp4x4, cam_pos, w, h, view_scale,
@@ -384,6 +380,9 @@ def main():
             else:
                 renderer.draw_cursor(wx, wy, sim.brush_radius, w, h,
                                      view_offset=view_offset, view_scale=view_scale)
+
+        # Tone-map HDR scene → default framebuffer before UI draws on top.
+        renderer.end_frame(w, h)
 
         imgui.new_frame()
         draw_ui(sim, tool, renderer)

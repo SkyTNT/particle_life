@@ -199,6 +199,11 @@ def draw_ui(sim, tool, renderer):
         _, renderer.glow_intensity = imgui.slider_float("Glow Intensity", renderer.glow_intensity, 0.0, 0.5, "%.3f")
         _, renderer.glow_steepness = imgui.slider_float("Glow Steepness", renderer.glow_steepness, 0.0, 12.0)
 
+        imgui.separator()
+        _, renderer.tone_mapping = imgui.checkbox("Tone Mapping", renderer.tone_mapping)
+        if renderer.tone_mapping:
+            _, renderer.exposure = imgui.slider_float("Exposure", renderer.exposure, 0.1, 4.0, "%.2f")
+
         if sim.mode3d:
             imgui.separator()
             _, renderer.fog = imgui.checkbox("Fog", renderer.fog)
