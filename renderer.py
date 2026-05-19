@@ -298,22 +298,22 @@ class Renderer:
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, self.ssbo_palette)
         glBindVertexArray(self.vao)
 
-        # Halo pass: depth WRITE off (keep test) so transparent halos don't occlude
-        # each other — otherwise a front halo punches a hole that blocks every halo
-        # behind it. Core pass: depth WRITE on so opaque cores correctly occlude in
-        # buffer-order-independent depth order (without this, back particles paint
-        # over front particles whenever they appear later in the buffer).
+        # Both passes: depth WRITE off, depth TEST on. The smoothstep edge of a
+        # core writes alpha down to a sub-pixel sliver; if depth were written
+        # there, that edge would punch a hole that occludes farther particles,
+        # producing rim outlines. And since the bin-sort in simulation.py
+        # reorders particles every step, the same overlap "wins" different
+        # particles on different frames → front/back flicker. Additive blending
+        # is order-independent so dropping depth writes is exactly right.
         depth_was_on = glIsEnabled(GL_DEPTH_TEST)
+        if depth_was_on:
+            glDepthMask(GL_FALSE)
 
         # Pass 1: glow halo (premultiplied output, additive accumulation).
         if self.particle_glow:
-            if depth_was_on:
-                glDepthMask(GL_FALSE)
             glBlendFunc(GL_ONE, GL_ONE)
             glUniform1i(u["pass_mode"], 1)
             glDrawArraysInstanced(GL_POINTS, 0, sim.num_particles, instances)
-            if depth_was_on:
-                glDepthMask(GL_TRUE)
 
         # Pass 2: crisp particle core. Honors the user's blending choice.
         if self.additive_blending:
@@ -322,6 +322,9 @@ class Renderer:
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glUniform1i(u["pass_mode"], 0)
         glDrawArraysInstanced(GL_POINTS, 0, sim.num_particles, instances)
+
+        if depth_was_on:
+            glDepthMask(GL_TRUE)
 
         glBindVertexArray(0)
 
