@@ -56,12 +56,14 @@ in vec3 vColor; in float vDepth; out vec4 fragColor;
 uniform int fog_enabled;
 uniform float fog_density;
 uniform float particle_opacity;
-uniform int pass_mode;
+uniform int pass_mode;   // 0 = core color, 1 = glow halo, 2 = depth-only pre-pass
 uniform float glow_intensity, glow_steepness;
 void main() {
     vec2 c = gl_PointCoord*2.0-1.0;
     float r2 = dot(c, c);
     if (r2 > 1.0) discard;
+    // Depth pre-pass: hard circle, color masked off in GL state.
+    if (pass_mode == 2) { fragColor = vec4(0.0); return; }
     float brightness = (vDepth > 0.0 && fog_enabled == 1) ? exp(-vDepth * fog_density) : 1.0;
     if (pass_mode == 1) {
         float falloff = clamp(1.0 - r2, 0.0, 1.0);
@@ -298,13 +300,17 @@ class Renderer:
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, self.ssbo_palette)
         glBindVertexArray(self.vao)
 
-        # Both passes: depth WRITE off, depth TEST on. The smoothstep edge of a
-        # core writes alpha down to a sub-pixel sliver; if depth were written
-        # there, that edge would punch a hole that occludes farther particles,
-        # producing rim outlines. And since the bin-sort in simulation.py
-        # reorders particles every step, the same overlap "wins" different
-        # particles on different frames → front/back flicker. Additive blending
-        # is order-independent so dropping depth writes is exactly right.
+        # Core color pass must run with depth WRITE off — the smoothstep edge
+        # writes a sub-pixel alpha sliver, and writing depth there punches a
+        # hole that occludes farther particles → rim outlines + front/back
+        # flicker as the bin-sort reorders particles every step.
+        #
+        # Additive blending is order-independent so that's enough on its own.
+        # Normal alpha blending isn't — the SSBO order changes every frame and
+        # "which particle wins each pixel" flickers. Fix that with a hard-edge
+        # depth pre-pass (color masked off, depth write on): GL_LESS picks the
+        # nearest particle deterministically, then the color pass uses GL_LEQUAL
+        # so only that nearest particle's color survives at each pixel.
         depth_was_on = glIsEnabled(GL_DEPTH_TEST)
         if depth_was_on:
             glDepthMask(GL_FALSE)
@@ -315,6 +321,19 @@ class Renderer:
             glUniform1i(u["pass_mode"], 1)
             glDrawArraysInstanced(GL_POINTS, 0, sim.num_particles, instances)
 
+        # Depth pre-pass: only needed for non-additive 3D rendering.
+        use_prepass = depth_was_on and not self.additive_blending
+        if use_prepass:
+            glDepthMask(GL_TRUE)
+            glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE)
+            glDisable(GL_BLEND)
+            glUniform1i(u["pass_mode"], 2)
+            glDrawArraysInstanced(GL_POINTS, 0, sim.num_particles, instances)
+            glEnable(GL_BLEND)
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE)
+            glDepthMask(GL_FALSE)
+            glDepthFunc(GL_LEQUAL)
+
         # Pass 2: crisp particle core. Honors the user's blending choice.
         if self.additive_blending:
             glBlendFunc(GL_SRC_ALPHA, GL_ONE)
@@ -323,6 +342,8 @@ class Renderer:
         glUniform1i(u["pass_mode"], 0)
         glDrawArraysInstanced(GL_POINTS, 0, sim.num_particles, instances)
 
+        if use_prepass:
+            glDepthFunc(GL_LESS)
         if depth_was_on:
             glDepthMask(GL_TRUE)
 
